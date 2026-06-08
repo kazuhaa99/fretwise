@@ -1,0 +1,24 @@
+services:
+  backend:
+    build: ./backend
+    expose:
+      - "8000"
+    environment:
+      # Demucs/Torch Hub cache the ~hundreds-MB model weights here on first
+      # use — pinning it to a named volume means they survive image rebuilds
+      # instead of re-downloading every time the container is recreated.
+      - TORCH_HOME=/cache/torch
+    volumes:
+      - jobs_data:/app/data/jobs
+      - model_cache:/cache/torch
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+
+volumes:
+  jobs_data:
+  model_cache:

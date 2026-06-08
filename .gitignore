@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Backend runtime data (uploaded files, separated stems, generated tabs)
+backend/data/
+
+# Generated fixtures from manual smoke tests
+backend/tests/fixtures/*.gp5
+
+# Node / frontend
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Build / verification logs left over from local debugging
+*.log
+
+# Local Claude Code tool state (machine-specific, not project source)
+.claude/
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store

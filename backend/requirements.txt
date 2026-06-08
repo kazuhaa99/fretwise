@@ -1,0 +1,28 @@
+# Web server
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+sse-starlette==2.2.1
+pydantic==2.10.5
+
+# Audio / video ingestion
+imageio-ffmpeg==0.5.1
+static-ffmpeg==3.0
+soundfile==0.13.0
+librosa==0.10.2.post1
+numpy==1.26.4
+
+# Source separation (guitar stem extraction)
+demucs==4.0.1
+torch==2.5.1
+torchaudio==2.5.1
+
+# Pitch / note transcription
+basic-pitch[onnx]==0.4.0
+
+# Guitar Pro export
+PyGuitarPro==0.10
+
+# Testing
+pytest==8.3.4
+httpx==0.28.1

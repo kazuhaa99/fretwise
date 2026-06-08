@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+@theme {
+  --color-walnut-950: #14100d;
+  --color-walnut-900: #1c1612;
+  --color-walnut-800: #2a221b;
+  --color-walnut-700: #3a3024;
+  --color-walnut-600: #4d4032;
+
+  --color-parchment: #f1e7d3;
+  --color-parchment-dark: #e3d5b8;
+
+  --color-brass: #d99a4e;
+  --color-brass-light: #f0bb7c;
+  --color-brass-dark: #a9722f;
+
+  --color-cream: #ece1d0;
+  --color-muted: #a89a86;
+  --color-string: #c9b896;
+
+  --font-sans: "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--color-walnut-950);
+  color: var(--color-cream);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: var(--color-brass);
+  color: var(--color-walnut-950);
+}
+
+/* subtle wood-grain texture for surfaces */
+.grain {
+  background-image:
+    repeating-linear-gradient(
+      100deg,
+      rgba(0, 0, 0, 0.05) 0px,
+      rgba(0, 0, 0, 0.05) 1px,
+      transparent 1px,
+      transparent 6px
+    );
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  height: 8px;
+  width: 8px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: var(--color-walnut-600);
+  border-radius: 9999px;
+}
