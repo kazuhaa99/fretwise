@@ -8,16 +8,26 @@ services:
       # use — pinning it to a named volume means they survive image rebuilds
       # instead of re-downloading every time the container is recreated.
       - TORCH_HOME=/cache/torch
+      # How many tracks may be processed at once. Each Demucs run can take
+      # several GB of RAM; raise this only on a machine that has it.
+      - FRETWISE_MAX_CONCURRENT_JOBS=${FRETWISE_MAX_CONCURRENT_JOBS:-1}
+      # Finished jobs (uploads, stems, tabs) are deleted after this many hours.
+      - FRETWISE_JOB_TTL_HOURS=${FRETWISE_JOB_TTL_HOURS:-24}
     volumes:
       - jobs_data:/app/data/jobs
       - model_cache:/cache/torch
+    restart: unless-stopped
 
   frontend:
     build: ./frontend
     ports:
       - "5173:80"
     depends_on:
-      - backend
+      # Wait for the API to actually answer, not just for its container to
+      # exist — otherwise the first page load can race uvicorn's startup.
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   jobs_data:

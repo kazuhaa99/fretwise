@@ -36,10 +36,10 @@ export default function TabViewer({ tab, currentTime, onSeek }: Props) {
 
   // Most stems hold a single guitar part; `tracks` only grows past one entry
   // when auto-detection finds a second simultaneous performance worth its own
-  // staff (see `separate_voices` on the backend). Reset to the first track
-  // whenever a new result comes in, so a previous job's selection can't linger.
+  // staff (see `separate_voices` on the backend). The parent keys this
+  // component by job id, so a new result remounts it and the selection starts
+  // over at the first track — no reset effect needed.
   const [trackIndex, setTrackIndex] = useState(0);
-  useEffect(() => setTrackIndex(0), [tab]);
   const track = tab.tracks[Math.min(trackIndex, tab.tracks.length - 1)];
 
   const staffHeight = (stringCount - 1) * ROW_HEIGHT;

@@ -119,10 +119,42 @@ def _make_song(title: str, artist: str, tempo: int, measure_count: int) -> gp.So
     return gp.Song(measureHeaders=headers, tracks=[], tempo=tempo, title=title, artist=artist)
 
 
-def _track_name(index: int, total: int) -> str:
+# GP5 stores every string (title, artist, track names) in a single-byte
+# "ANSI" code page, and Guitar Pro decodes it with the reader's system code
+# page — there is no Unicode option in the format. Western files are cp1252
+# (PyGuitarPro's default), Cyrillic ones are cp1251, which is exactly what
+# Guitar Pro on a Russian-locale Windows reads. We pick the first code page
+# that can represent all of the song's text, so a Latin title stays a plain
+# cp1252 file for everyone while a Cyrillic title survives instead of crashing
+# the export with UnicodeEncodeError.
+_GP_ENCODINGS = ("cp1252", "cp1251")
+
+
+def choose_encoding(*texts: str) -> str:
+    """The first GP-compatible code page that can encode every text in `texts`,
+    or the default (cp1252) if none can — callers then replace the leftovers
+    via `_encodable` rather than failing the whole export over one character."""
+    for encoding in _GP_ENCODINGS:
+        try:
+            for text in texts:
+                text.encode(encoding)
+        except UnicodeEncodeError:
+            continue
+        return encoding
+    return _GP_ENCODINGS[0]
+
+
+def _encodable(text: str, encoding: str) -> str:
+    return text.encode(encoding, errors="replace").decode(encoding)
+
+
+def track_name(index: int, total: int) -> str:
     """Plain "Guitar" for the (overwhelmingly common) single-part case — matching
     this project's pre-multi-track label exactly — and "Guitar 1"/"Guitar 2"/...
-    once `separate_voices` auto-detects more than one simultaneous performance."""
+    once `separate_voices` auto-detects more than one simultaneous performance.
+
+    Public because the JSON result (`jobs/manager.py`) must label tracks exactly
+    the way the .gp5 file does — one definition keeps the two from drifting."""
     return "Guitar" if total == 1 else f"Guitar {index + 1}"
 
 
@@ -195,12 +227,14 @@ def export_gp5(
     silence (rests), the way a real multi-guitar arrangement's score is laid out.
     """
     tempo = min(max(int(tempo), _MIN_TEMPO), _MAX_TEMPO)
+    encoding = choose_encoding(title, artist)
+    title, artist = _encodable(title, encoding), _encodable(artist, encoding)
     total_slots = max((_total_slots(events, tempo) for events in tracks), default=_SLOTS_PER_MEASURE)
     measure_count = total_slots // _SLOTS_PER_MEASURE
 
     song = _make_song(title=title, artist=artist, tempo=tempo, measure_count=measure_count)
     for index, events in enumerate(tracks):
-        track = _make_track(song, fretboard, number=index + 1, name=_track_name(index, len(tracks)))
+        track = _make_track(song, fretboard, number=index + 1, name=track_name(index, len(tracks)))
         _populate_track(track, fretboard, events, tempo, total_slots)
 
-    gp.write(song, str(output_path), version=(5, 1, 0))
+    gp.write(song, str(output_path), version=(5, 1, 0), encoding=encoding)

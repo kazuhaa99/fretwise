@@ -3,7 +3,7 @@ from pathlib import Path
 import guitarpro as gp
 
 from app.pipeline.fretboard import Fretboard, note_name_to_midi
-from app.pipeline.gp_export import _slot_seconds, _total_slots, export_gp5
+from app.pipeline.gp_export import _slot_seconds, _total_slots, export_gp5, track_name
 from app.pipeline.tab_builder import Note, TabEvent, TabNote, build_tab
 
 STANDARD = Fretboard.from_note_names(["E2", "A2", "D3", "G3", "B3", "E4"], max_fret=22)
@@ -130,3 +130,26 @@ def test_total_slots_always_a_whole_number_of_measures():
 
 def test_slot_seconds_scales_inversely_with_tempo():
     assert _slot_seconds(60) > _slot_seconds(120) > _slot_seconds(240)
+
+
+def test_track_name_labels_single_and_multiple_parts():
+    assert track_name(0, 1) == "Guitar"
+    assert [track_name(i, 2) for i in range(2)] == ["Guitar 1", "Guitar 2"]
+
+
+def test_export_with_cyrillic_title_uses_cp1251(tmp_path):
+    out = tmp_path / "ru.gp5"
+    export_gp5([_sample_tab()], STANDARD, out, title="Звезда по имени Солнце", artist="Fretwise", tempo=120)
+    assert gp.parse(str(out), encoding="cp1251").title == "Звезда по имени Солнце"
+
+
+def test_export_with_latin_title_stays_cp1252(tmp_path):
+    out = tmp_path / "fr.gp5"
+    export_gp5([_sample_tab()], STANDARD, out, title="Café Señor", artist="Fretwise", tempo=120)
+    assert gp.parse(str(out)).title == "Café Señor"
+
+
+def test_export_with_unencodable_title_degrades_instead_of_crashing(tmp_path):
+    out = tmp_path / "mixed.gp5"
+    export_gp5([_sample_tab()], STANDARD, out, title="ギター riff", artist="Fretwise", tempo=120)
+    assert gp.parse(str(out)).title.endswith(" riff")

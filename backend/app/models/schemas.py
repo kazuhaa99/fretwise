@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from ..pipeline.fretboard import midi_to_note_name, note_name_to_midi
 
 JobStage = Literal[
     "queued",
@@ -35,13 +37,54 @@ class JobStatus(BaseModel):
     error: Optional[str] = None
 
 
+# Bounds for a believable open-string pitch. The low end leaves room for
+# 8-string guitars (F#1) and basses (E1, B0 on a 5-string is already outside a
+# guitar app's remit); the high end allows the highest common open tunings
+# (open E tops out at E4) with slack. Anything outside is almost certainly a
+# typo — "E7" instead of "E2" — and would otherwise sail through to the
+# pipeline and produce a tab no instrument can play.
+MIN_OPEN_STRING_MIDI = note_name_to_midi("A0")
+MAX_OPEN_STRING_MIDI = note_name_to_midi("A4")
+MIN_STRINGS = 4
+MAX_STRINGS = 8
+MAX_CAPO = 12
+
+
 class TabSettings(BaseModel):
+    """Arrangement settings sent alongside an upload.
+
+    Validated up front, at the API boundary, instead of letting a bad value
+    fail deep inside the pipeline minutes later: an unparseable note name used
+    to surface only once `Fretboard.from_note_names` ran — after the user had
+    already waited through source separation.
+    """
+
     model_config = _camel_config
 
-    tuning: list[str]
-    capo: int = 0
+    tuning: list[str] = Field(min_length=MIN_STRINGS, max_length=MAX_STRINGS)
+    capo: int = Field(0, ge=0, le=MAX_CAPO)
     max_fret_span: int = Field(4, alias="maxFretSpan", ge=2, le=8)
     position_jump_weight: float = Field(1.0, alias="positionJumpWeight", ge=0.0, le=4.0)
+
+    @field_validator("tuning")
+    @classmethod
+    def _validate_tuning(cls, tuning: list[str]) -> list[str]:
+        """Every string must be a parseable note in a plausible register.
+
+        Messages are in Russian because they are shown to the user verbatim
+        (see `api/errors.py`).
+        """
+        for index, name in enumerate(tuning, start=1):
+            try:
+                midi = note_name_to_midi(name)
+            except ValueError:
+                raise ValueError(f"струна {index}: «{name}» — не нота (ожидается, например, E2, F#3 или Bb1)") from None
+            if not MIN_OPEN_STRING_MIDI <= midi <= MAX_OPEN_STRING_MIDI:
+                raise ValueError(
+                    f"струна {index}: нота {name} вне допустимого диапазона "
+                    f"({midi_to_note_name(MIN_OPEN_STRING_MIDI)}–{midi_to_note_name(MAX_OPEN_STRING_MIDI)})"
+                )
+        return [name.strip() for name in tuning]
 
 
 class TabNote(BaseModel):

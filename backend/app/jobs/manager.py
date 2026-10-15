@@ -4,17 +4,34 @@ This is a local, single-user app — there is exactly one "worker" (this
 process) and no need for the operational overhead of Redis/Celery. An
 `asyncio` task per job plus an in-memory job table covers tracking, SSE
 progress fan-out, and result storage with nothing extra to install or run.
+
+Being in-process doesn't excuse it from the basics a long-running server
+needs, though:
+
+- **Bounded concurrency.** Demucs alone can take several GB of RAM per
+  track; two uploads at once used to start two separations side by side and
+  could take the machine down. Jobs now wait their turn behind a semaphore
+  (`FRETWISE_MAX_CONCURRENT_JOBS`, default 1), and "queued" is a real stage
+  that tells the user where they stand.
+- **Bounded disk usage.** Every job keeps its upload, a decoded WAV and the
+  separated stem — easily hundreds of MB per song. Finished jobs expire after
+  `FRETWISE_JOB_TTL_HOURS` (default 24), and job folders left behind by a
+  previous run (the table is in memory, so a restart forgets them) are swept
+  on startup.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
+import re
 import shutil
 import time
+import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import AsyncIterable, Optional
 
 from ..models import schemas
 from ..pipeline import gp_export, ingest, separation, transcription
@@ -30,6 +47,28 @@ UPLOAD_FILENAME_STEM = "upload"
 EXTRACTED_AUDIO_FILENAME = "audio.wav"
 GUITAR_STEM_FILENAME = "guitar.wav"
 TAB_FILENAME = "tab.gp5"
+
+FALLBACK_TITLE = "fretwise"
+MAX_TITLE_LENGTH = 100
+
+DEFAULT_MAX_CONCURRENT_JOBS = 1
+DEFAULT_JOB_TTL_HOURS = 24.0
+MAX_CONCURRENT_JOBS_ENV = "FRETWISE_MAX_CONCURRENT_JOBS"
+JOB_TTL_HOURS_ENV = "FRETWISE_JOB_TTL_HOURS"
+
+# How often the background sweeper looks for expired jobs. Expiry is measured
+# in hours, so checking every few minutes is plenty — and `submit` purges too,
+# so a busy server never lets expired jobs pile up between sweeps.
+_PURGE_INTERVAL_SECONDS = 600.0
+
+# Job folders are named after `uuid4().hex`. Only folders matching that exact
+# shape are ever deleted by the startup sweep, so pointing `jobs_root` at a
+# directory that also holds other things can't cost anyone their files.
+_JOB_DIR_RE = re.compile(r"^[0-9a-f]{32}$")
+
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
+
+_TERMINAL_STAGES = frozenset({"done", "error"})
 
 # Coarse elapsed-time-vs-estimate progress for stages with no progress hook in
 # the underlying library (see `separation.py`'s docstring on why this can't be
@@ -47,15 +86,80 @@ class JobError(Exception):
     """Raised inside the pipeline to report a user-facing failure message."""
 
 
+class EmptyUploadError(JobError):
+    """The uploaded file had no content at all."""
+
+
+class UploadTooLargeError(JobError):
+    """The upload exceeded the size limit while it was being written to disk."""
+
+
+class JobBusyError(JobError):
+    """The job is still queued or running, so it can't be deleted yet."""
+
+
+def sanitize_title(filename: str) -> str:
+    """Derive a display title / download name from a client-supplied filename.
+
+    The filename comes straight from the browser, so it is untrusted: it may
+    carry a path (old IE and some tools send `C:\\Users\\...\\song.mp3`),
+    control characters, characters that are illegal in filenames on Windows,
+    or be absurdly long. We keep only the basename without its extension,
+    drop anything a filesystem or a Content-Disposition header would choke on,
+    and fall back to a neutral name if nothing usable remains. Non-ASCII text
+    (Cyrillic song titles!) is kept as-is — Starlette's `FileResponse` encodes
+    it into an RFC 5987 `filename*=` header so browsers download it correctly.
+    """
+    base = filename.replace("\\", "/").rsplit("/", 1)[-1]
+    stem = base.rsplit(".", 1)[0] if "." in base.strip(".") else base
+    stem = unicodedata.normalize("NFC", stem)
+    cleaned = "".join(
+        " " if unicodedata.category(ch).startswith("C") or ch in '<>:"/\\|?*' else ch
+        for ch in stem
+    )
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
+    cleaned = cleaned[:MAX_TITLE_LENGTH].rstrip(" .")
+    return cleaned or FALLBACK_TITLE
+
+
+def _env_number(name: str, default: float, *, cast, minimum: float):
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = cast(raw)
+    except ValueError:
+        raise ValueError(f"{name}={raw!r}: ожидается число") from None
+    if value < minimum:
+        raise ValueError(f"{name}={raw!r}: значение должно быть не меньше {minimum}")
+    return value
+
+
+def max_concurrent_jobs_from_env() -> int:
+    """Read `FRETWISE_MAX_CONCURRENT_JOBS`, failing loudly at startup on a typo
+    rather than silently running with a surprising limit."""
+    return _env_number(MAX_CONCURRENT_JOBS_ENV, DEFAULT_MAX_CONCURRENT_JOBS, cast=int, minimum=1)
+
+
+def job_ttl_hours_from_env() -> float:
+    return _env_number(JOB_TTL_HOURS_ENV, DEFAULT_JOB_TTL_HOURS, cast=float, minimum=0.0)
+
+
 @dataclass
 class Job:
     id: str
+    title: str  # sanitized original filename (no extension) — see `sanitize_title`
     settings: schemas.TabSettings
     upload_path: Path
     work_dir: Path
     status: schemas.JobStatus
     result: Optional[schemas.JobResult] = None
+    finished_at: Optional[float] = None  # `time.monotonic()` when it reached done/error
     _subscribers: list[asyncio.Queue] = field(default_factory=list)
+
+    @property
+    def is_finished(self) -> bool:
+        return self.status.stage in _TERMINAL_STAGES
 
     def publish(self, *, stage: schemas.JobStage, progress: float, message: str, error: Optional[str] = None) -> None:
         self._emit(schemas.JobStatus(
@@ -75,6 +179,8 @@ class Job:
         SSE and fetch `/result` before it exists (see `_run_pipeline`).
         """
         self.status = status
+        if status.stage in _TERMINAL_STAGES and self.finished_at is None:
+            self.finished_at = time.monotonic()
         for queue in list(self._subscribers):
             queue.put_nowait(status)
 
@@ -102,40 +208,184 @@ class Job:
 
 
 class JobManager:
-    def __init__(self, jobs_root: Path):
+    def __init__(
+        self,
+        jobs_root: Path,
+        *,
+        max_concurrent_jobs: int = DEFAULT_MAX_CONCURRENT_JOBS,
+        job_ttl_hours: float = DEFAULT_JOB_TTL_HOURS,
+    ):
+        if max_concurrent_jobs < 1:
+            raise ValueError("max_concurrent_jobs must be at least 1")
         self._jobs: dict[str, Job] = {}
         self._jobs_root = jobs_root
         self._jobs_root.mkdir(parents=True, exist_ok=True)
+        self._job_ttl_seconds = job_ttl_hours * 3600.0
+        self._semaphore = asyncio.Semaphore(max_concurrent_jobs)
+        self._waiting: list[Job] = []
+        # The event loop only keeps *weak* references to tasks, so a fire-and-
+        # forget `create_task` result can be garbage-collected mid-run (see the
+        # warning in the `asyncio.create_task` docs). Holding them here until
+        # they finish is the documented fix.
+        self._tasks: set[asyncio.Task] = set()
+        self._purge_task: Optional[asyncio.Task] = None
+
+    # -- lifecycle -----------------------------------------------------------
+
+    async def start(self) -> None:
+        """Called from the app's lifespan: clean up after the previous run and
+        start the periodic expiry sweep."""
+        self.sweep_orphaned_dirs()
+        self._purge_task = asyncio.create_task(self._purge_periodically())
+
+    async def stop(self) -> None:
+        if self._purge_task is not None:
+            self._purge_task.cancel()
+            try:
+                await self._purge_task
+            except asyncio.CancelledError:
+                pass
+            self._purge_task = None
+
+    async def _purge_periodically(self) -> None:
+        interval = min(_PURGE_INTERVAL_SECONDS, max(self._job_ttl_seconds / 2, 1.0))
+        while True:
+            await asyncio.sleep(interval)
+            self.purge_expired()
+
+    def sweep_orphaned_dirs(self) -> list[str]:
+        """Delete job folders on disk that no in-memory job owns.
+
+        The job table lives in memory, so after a restart every folder from the
+        previous run is unreachable through the API — nothing would ever
+        delete it. Only directories named like a job id are touched.
+        """
+        removed = []
+        for entry in self._jobs_root.iterdir():
+            if entry.is_dir() and _JOB_DIR_RE.match(entry.name) and entry.name not in self._jobs:
+                shutil.rmtree(entry, ignore_errors=True)
+                removed.append(entry.name)
+        return removed
+
+    def purge_expired(self, now: Optional[float] = None) -> list[str]:
+        """Delete finished jobs older than the TTL. Queued/running jobs are
+        never touched, however long they take."""
+        now = time.monotonic() if now is None else now
+        expired = [
+            job.id for job in self._jobs.values()
+            if job.finished_at is not None and now - job.finished_at >= self._job_ttl_seconds
+        ]
+        for job_id in expired:
+            self.discard(job_id)
+        return expired
+
+    # -- job table -----------------------------------------------------------
 
     def get(self, job_id: str) -> Optional[Job]:
         return self._jobs.get(job_id)
 
-    async def submit(self, *, filename: str, content: bytes, settings: schemas.TabSettings) -> Job:
+    async def submit(
+        self,
+        *,
+        filename: str,
+        chunks: AsyncIterable[bytes],
+        settings: schemas.TabSettings,
+        max_bytes: int,
+    ) -> Job:
+        """Stream an upload to disk and enqueue it.
+
+        The upload is written chunk by chunk with a running size count instead
+        of being read into memory whole: a 500 MB video used to mean 500 MB of
+        RAM (on top of the copy Starlette had already spooled to disk) before
+        the size was even checked. On any failure the half-written job folder
+        is removed, so rejected uploads leave nothing behind.
+        """
         suffix = Path(filename).suffix.lower()
         if suffix not in ACCEPTED_EXTENSIONS:
-            raise JobError(f"Формат файла «{suffix}» не поддерживается")
+            raise JobError(f"Формат файла «{suffix or 'без расширения'}» не поддерживается")
+
+        self.purge_expired()
 
         job_id = uuid.uuid4().hex
         work_dir = self._jobs_root / job_id
         work_dir.mkdir(parents=True, exist_ok=True)
         upload_path = work_dir / f"{UPLOAD_FILENAME_STEM}{suffix}"
-        upload_path.write_bytes(content)
+
+        try:
+            written = 0
+            with upload_path.open("wb") as fh:
+                async for chunk in chunks:
+                    written += len(chunk)
+                    if written > max_bytes:
+                        limit_mb = max_bytes // (1024 * 1024)
+                        raise UploadTooLargeError(f"Файл слишком большой (лимит — {limit_mb} МБ)")
+                    await asyncio.to_thread(fh.write, chunk)
+            if written == 0:
+                raise EmptyUploadError("Файл пуст")
+        except BaseException:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            raise
 
         job = Job(
             id=job_id,
+            title=sanitize_title(filename),
             settings=settings,
             upload_path=upload_path,
             work_dir=work_dir,
             status=schemas.JobStatus(id=job_id, stage="queued", progress=0.0, message="В очереди на обработку"),
         )
         self._jobs[job_id] = job
-        asyncio.create_task(_run_pipeline(job))
+        task = asyncio.create_task(self._run(job))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
         return job
+
+    def delete(self, job_id: str) -> None:
+        """Delete a finished job on the user's request (`DELETE /api/jobs/{id}`).
+
+        Running jobs are refused rather than cancelled: their pipeline step runs
+        in a worker thread that can't be interrupted, so "deleting" one would
+        only pull the folder out from under Demucs mid-write.
+        """
+        job = self._jobs.get(job_id)
+        if job is None:
+            raise KeyError(job_id)
+        if not job.is_finished:
+            raise JobBusyError("Задача ещё выполняется — удалить её можно после завершения")
+        self.discard(job_id)
 
     def discard(self, job_id: str) -> None:
         job = self._jobs.pop(job_id, None)
         if job is not None:
             shutil.rmtree(job.work_dir, ignore_errors=True)
+
+    # -- scheduling ----------------------------------------------------------
+
+    async def _run(self, job: Job) -> None:
+        self._waiting.append(job)
+        self._announce_queue_positions()
+        try:
+            async with self._semaphore:
+                self._waiting.remove(job)
+                self._announce_queue_positions()
+                await _run_pipeline(job)
+        finally:
+            if job in self._waiting:
+                self._waiting.remove(job)
+                self._announce_queue_positions()
+
+    def _announce_queue_positions(self) -> None:
+        """Tell every waiting job where it stands, so "queued" means something.
+
+        Only reached while the semaphore is actually saturated; a job that gets
+        a slot straight away leaves the waiting list before anyone sees this.
+        """
+        for position, job in enumerate(self._waiting, start=1):
+            if self._semaphore.locked():
+                message = f"В очереди: позиция {position}. Начнём, как только освободится обработчик"
+            else:
+                message = "В очереди на обработку"
+            job.publish(stage="queued", progress=0.0, message=message)
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +437,7 @@ async def _run_pipeline(job: Job) -> None:
             tracks,
             fretboard,
             job.tab_path,
-            title=Path(job.upload_path).stem,
+            title=job.title,
             artist="Fretwise",
             tempo=tempo,
         )
@@ -206,13 +456,6 @@ async def _run_pipeline(job: Job) -> None:
         job.publish(stage="error", progress=job.status.progress, message="Не получилось обработать файл", error=str(exc))
 
 
-def _track_name(index: int, total: int) -> str:
-    """Plain "Guitar" when `separate_voices` found only one part — matching the
-    old single-track label exactly — and "Guitar 1"/"Guitar 2"/... once it
-    auto-detects more than one simultaneous performance in the stem."""
-    return "Guitar" if total == 1 else f"Guitar {index + 1}"
-
-
 def _build_result(
     job: Job, *, status: schemas.JobStatus, tracks, fretboard: Fretboard, tempo: int, duration_seconds: float
 ) -> schemas.JobResult:
@@ -223,7 +466,7 @@ def _build_result(
         duration_seconds=duration_seconds,
         tracks=[
             schemas.TabTrack(
-                name=_track_name(index, len(tracks)),
+                name=gp_export.track_name(index, len(tracks)),
                 events=[
                     schemas.TabEvent(
                         time=event.time,

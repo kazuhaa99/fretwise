@@ -54,7 +54,10 @@ def get_router(manager: JobManager) -> APIRouter:
         if not job.tab_path.exists():
             raise HTTPException(status_code=404, detail="Файл табулатуры не найден")
 
-        download_name = f"{job.upload_path.stem}.gp5"
+        # The original file's (sanitized) name, not the on-disk "upload.<ext>":
+        # FileResponse emits an RFC 5987 `filename*=utf-8''...` header for
+        # non-ASCII names, so Cyrillic titles download intact.
+        download_name = f"{job.title}.gp5"
         return FileResponse(
             job.tab_path,
             media_type="application/octet-stream",

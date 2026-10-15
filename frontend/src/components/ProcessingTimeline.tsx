@@ -17,10 +17,13 @@ function stageIndex(stage: JobStage): number {
 
 interface Props {
   status: JobStatus;
+  /** Set when contact with the job was lost (backend down, job deleted). */
+  connectionError?: string | null;
 }
 
-export default function ProcessingTimeline({ status }: Props) {
+export default function ProcessingTimeline({ status, connectionError }: Props) {
   const current = stageIndex(status.stage);
+  const stalled = Boolean(connectionError);
 
   return (
     <div className="w-full rounded-2xl border border-walnut-700 bg-walnut-900/60 p-8">
@@ -32,7 +35,7 @@ export default function ProcessingTimeline({ status }: Props) {
       <ol className="space-y-5">
         {STAGES.map((stage, i) => {
           const done = current > i || status.stage === "done";
-          const active = current === i && status.stage !== "error";
+          const active = current === i && status.stage !== "error" && !stalled;
 
           return (
             <li key={stage.key} className="flex items-start gap-4">
@@ -74,8 +77,15 @@ export default function ProcessingTimeline({ status }: Props) {
         })}
       </ol>
 
+      {stalled && status.stage !== "error" && (
+        <div role="alert" className="mt-6 rounded-xl border border-red-900/50 bg-red-950/30 p-4 text-sm text-red-300">
+          <p className="font-medium">Связь с обработкой потеряна</p>
+          <p className="mt-1 text-red-300/80">{connectionError}</p>
+        </div>
+      )}
+
       {status.stage === "error" && (
-        <div className="mt-6 rounded-xl border border-red-900/50 bg-red-950/30 p-4 text-sm text-red-300">
+        <div role="alert" className="mt-6 rounded-xl border border-red-900/50 bg-red-950/30 p-4 text-sm text-red-300">
           <p className="font-medium">Не получилось обработать файл</p>
           <p className="mt-1 text-red-300/80">{status.error || "Неизвестная ошибка. Попробуй другой файл."}</p>
         </div>

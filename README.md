@@ -53,6 +53,8 @@ The first build takes a while because the backend image pulls PyTorch and the ML
 - `jobs_data`: uploaded files, intermediate stems and job results
 - `model_cache`: Demucs weights (several hundred MB), referenced via `TORCH_HOME=/cache/torch`
 
+The backend container runs as an unprivileged user, reports its health on `/api/health`, and the frontend only starts once that check passes.
+
 Reset everything, including cached models and jobs:
 
 ```bash
@@ -61,7 +63,7 @@ docker compose down -v
 
 ### Option 2: Local development
 
-Requirements: **Python 3.11+**, **Node.js 20+**. You don't need to install `ffmpeg` separately because the backend uses bundled binaries from `imageio-ffmpeg` / `static-ffmpeg`.
+Requirements: **Python 3.11** (the pinned NumPy/PyTorch versions don't support 3.13 yet), **Node.js 22+**. You don't need to install `ffmpeg` separately because the backend uses bundled binaries from `imageio-ffmpeg` / `static-ffmpeg`.
 
 ```bash
 # Backend: FastAPI on http://127.0.0.1:8000
@@ -79,6 +81,15 @@ npm install
 npm run dev
 ```
 
+### Configuration
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `FRETWISE_MAX_CONCURRENT_JOBS` | `1` | How many tracks are processed at once. Extra uploads wait in a queue and see their position. Each Demucs run can use several GB of RAM. |
+| `FRETWISE_JOB_TTL_HOURS` | `24` | Finished jobs and their files are deleted after this many hours. Job folders left over from a previous run are removed on startup. |
+
+A finished job can also be deleted right away with `DELETE /api/jobs/{id}`.
+
 ### Models
 
 Models are downloaded on first use and cached:
@@ -91,7 +102,13 @@ Models are downloaded on first use and cached:
 ```bash
 cd backend
 python -m pytest
+
+cd frontend
+npm test        # Vitest + Testing Library
+npm run lint
 ```
+
+The backend suite needs neither PyTorch nor Demucs nor network access, because separation is imported lazily and stubbed in tests. CI (`.github/workflows/ci.yml`) installs the requirements without `torch`/`torchaudio`/`demucs` and runs pytest, then runs the frontend's lint, tests and build.
 
 The unit tests cover the fretboard model, the tab builder (span and string constraints, position minimisation), Guitar Pro export and the HTTP API. Demucs is replaced with a pass-through stub in tests because it is too heavy for unit tests. The full pipeline can be checked end to end with the scripts in `backend/scripts/`.
 

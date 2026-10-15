@@ -25,14 +25,36 @@ RUN pip install --no-cache-dir --retries 10 \
     torch==2.5.1 torchaudio==2.5.1
 RUN pip install --no-cache-dir --retries 10 -r requirements.txt
 
-COPY app ./app
+# Fetch static-ffmpeg's binaries now, at build time and as root, instead of on
+# the first processed track: the runtime user can't write into site-packages,
+# and a container shouldn't need internet access just to decode audio.
+# static-ffmpeg also takes a file lock *inside its own package directory* on
+# every call, so that one lock file must stay writable for the app user.
+RUN python -c "import static_ffmpeg; static_ffmpeg.add_paths()" \
+    && chmod 666 "$(python -c 'import static_ffmpeg.run as r; print(r.LOCK_FILE)')"
+
+# Run as an unprivileged user. The two writable locations — job data and the
+# Torch Hub model cache — are created and owned by it up front, so the named
+# volumes docker compose mounts there inherit that ownership on first use.
+RUN useradd --system --create-home --uid 10001 fretwise \
+    && mkdir -p /app/data/jobs /cache/torch \
+    && chown -R fretwise:fretwise /app/data /cache
+
+COPY --chown=fretwise:fretwise app ./app
 
 # Without this, Python buffers stdout when it isn't a TTY — `docker compose
 # logs` would then show nothing until the buffer happens to flush, which makes
 # debugging a running container needlessly hard. Placed after the slow pip
 # layers so changing it never invalidates that ~10-minute cache.
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONUNBUFFERED=1 \
+    TORCH_HOME=/cache/torch
+
+USER fretwise
 
 EXPOSE 8000
+
+# python:3.11-slim ships without curl/wget; the stdlib is enough for a probe.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
+    CMD python -c "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4).status == 200 else 1)"
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

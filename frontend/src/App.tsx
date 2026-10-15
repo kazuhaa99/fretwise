@@ -4,10 +4,21 @@ import SettingsPanel from "./components/SettingsPanel";
 import ProcessingTimeline from "./components/ProcessingTimeline";
 import TabViewer from "./components/TabViewer";
 import AudioPlayer, { type AudioPlayerHandle } from "./components/AudioPlayer";
-import { uploadJob, getJobResult, jobEventsUrl, gp5DownloadUrl } from "./api/client";
+import {
+  uploadJob,
+  getJobResult,
+  getJobStatus,
+  jobEventsUrl,
+  gp5DownloadUrl,
+  errorMessage,
+  isNotFound,
+} from "./api/client";
 import { DEFAULT_SETTINGS, type JobResult, type JobStatus, type TabSettings } from "./types";
 
 type View = "upload" | "processing" | "result";
+
+const JOB_GONE_MESSAGE =
+  "Задача не найдена на сервере — возможно, он был перезапущен или задача удалена. Загрузи файл ещё раз.";
 
 export default function App() {
   const [view, setView] = useState<View>("upload");
@@ -16,55 +27,131 @@ export default function App() {
   const [status, setStatus] = useState<JobStatus | null>(null);
   const [result, setResult] = useState<JobResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Lost contact with the job (backend down, job gone) — distinct from the
+  // pipeline itself failing, which arrives as a normal `stage: "error"` status.
+  const [connectionError, setConnectionError] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const playerRef = useRef<AudioPlayerHandle>(null);
   const esRef = useRef<EventSource | null>(null);
 
-  const reset = () => {
+  const closeStream = useCallback(() => {
     esRef.current?.close();
     esRef.current = null;
+  }, []);
+
+  const reset = useCallback(() => {
+    closeStream();
     setView("upload");
     setFile(null);
     setStatus(null);
     setResult(null);
     setError(null);
+    setConnectionError(null);
     setCurrentTime(0);
-  };
+  }, [closeStream]);
+
+  const loadResult = useCallback(async (jobId: string) => {
+    try {
+      const res = await getJobResult(jobId);
+      setResult(res);
+      setView("result");
+    } catch (e) {
+      setConnectionError(isNotFound(e) ? JOB_GONE_MESSAGE : errorMessage(e, "Не удалось загрузить результат"));
+    }
+  }, []);
+
+  /**
+   * Follow a job's progress over SSE until it finishes.
+   *
+   * EventSource reconnects on its own after a dropped connection and only
+   * tells us via `onerror` — with no status code, so it can't distinguish a
+   * proxy hiccup from a dead backend or a job that no longer exists. Without
+   * handling it, a crashed backend left the UI on "processing" forever. On
+   * every error we ask the plain status endpoint what is going on: a healthy
+   * answer means "let the browser reconnect" (or the job finished while we
+   * were away), anything else stops the stream and tells the user.
+   */
+  const watchJob = useCallback(
+    (jobId: string) => {
+      closeStream();
+      setConnectionError(null);
+      const es = new EventSource(jobEventsUrl(jobId));
+      esRef.current = es;
+
+      const handleStatus = (data: JobStatus) => {
+        setStatus(data);
+        if (data.stage === "done") {
+          closeStream();
+          void loadResult(jobId);
+        } else if (data.stage === "error") {
+          closeStream();
+        }
+      };
+
+      es.onmessage = (ev) => {
+        if (esRef.current !== es) return;
+        handleStatus(JSON.parse(ev.data) as JobStatus);
+      };
+
+      es.onerror = async () => {
+        if (esRef.current !== es) return;
+        try {
+          const current = await getJobStatus(jobId);
+          if (esRef.current === es) handleStatus(current);
+        } catch (e) {
+          if (esRef.current !== es) return;
+          closeStream();
+          setConnectionError(isNotFound(e) ? JOB_GONE_MESSAGE : errorMessage(e, "Сервер недоступен"));
+        }
+      };
+    },
+    [loadResult, closeStream],
+  );
 
   const startJob = useCallback(async () => {
     if (!file) return;
     setError(null);
+    setConnectionError(null);
     try {
       const job = await uploadJob(file, settings);
       setStatus(job);
       setView("processing");
-
-      const es = new EventSource(jobEventsUrl(job.id));
-      esRef.current = es;
-      es.onmessage = async (ev) => {
-        const data: JobStatus = JSON.parse(ev.data);
-        setStatus(data);
-        if (data.stage === "done") {
-          es.close();
-          esRef.current = null;
-          try {
-            const res = await getJobResult(job.id);
-            setResult(res);
-            setView("result");
-          } catch (e) {
-            setError(e instanceof Error ? e.message : "Не удалось загрузить результат");
-          }
-        } else if (data.stage === "error") {
-          es.close();
-          esRef.current = null;
-        }
-      };
+      watchJob(job.id);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Не удалось загрузить файл");
+      const message = errorMessage(e, "Не удалось загрузить файл");
+      // A retry from the processing screen has no upload form to show the
+      // error next to, so it goes into the processing view's error box.
+      if (view === "processing") setConnectionError(message);
+      else setError(message);
     }
-  }, [file, settings]);
+  }, [file, settings, watchJob, view]);
+
+  /** "Попробовать снова": resume watching the same job if the server still
+   * has it, otherwise upload the same file again with the same settings. */
+  const retry = useCallback(async () => {
+    if (!status) return;
+    if (status.stage !== "error") {
+      try {
+        await getJobStatus(status.id);
+        watchJob(status.id);
+        return;
+      } catch (e) {
+        if (!isNotFound(e)) {
+          setConnectionError(errorMessage(e, "Сервер недоступен"));
+          return;
+        }
+      }
+    }
+    if (file) {
+      await startJob();
+    } else {
+      reset();
+    }
+  }, [status, file, watchJob, startJob, reset]);
 
   useEffect(() => () => esRef.current?.close(), []);
+
+  const failed = status?.stage === "error" || connectionError !== null;
 
   return (
     <div className="min-h-screen">
@@ -127,8 +214,24 @@ export default function App() {
         )}
 
         {view === "processing" && status && (
-          <div className="mx-auto max-w-xl">
-            <ProcessingTimeline status={status} />
+          <div className="mx-auto max-w-xl space-y-6">
+            <ProcessingTimeline status={status} connectionError={connectionError} />
+            {failed && (
+              <div className="flex flex-wrap justify-center gap-3">
+                <button
+                  onClick={retry}
+                  className="rounded-full bg-brass px-6 py-3 text-sm font-semibold text-walnut-950 transition-colors hover:bg-brass-light"
+                >
+                  Попробовать снова
+                </button>
+                <button
+                  onClick={reset}
+                  className="rounded-full px-6 py-3 text-sm font-medium text-cream ring-1 ring-walnut-600 transition-colors hover:ring-brass"
+                >
+                  Загрузить другой файл
+                </button>
+              </div>
+            )}
           </div>
         )}
 
@@ -160,6 +263,7 @@ export default function App() {
             />
 
             <TabViewer
+              key={result.job.id}
               tab={result.tab}
               currentTime={currentTime}
               onSeek={(t) => playerRef.current?.seekTo(t)}

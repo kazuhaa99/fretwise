@@ -12,13 +12,16 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 import guitarpro as gp
 import pytest
 from fastapi.testclient import TestClient
 
+from app.api import upload as upload_api
 from app.jobs import manager as manager_module
 from app.main import create_app
 
@@ -156,3 +159,135 @@ def test_sse_stream_reports_progress_through_to_done(client):
     order = ["queued", "extracting_audio", "separating", "transcribing", "arranging", "exporting", "done"]
     indices = [order.index(stage) for stage in stages_seen]
     assert indices == sorted(indices), f"stages out of order: {stages_seen}"
+
+
+def _upload_named(client, filename: str) -> str:
+    with FIXTURE.open("rb") as fh:
+        response = client.post(
+            "/api/jobs",
+            files={"file": (filename, fh, "audio/wav")},
+            data={"settings": json.dumps(SETTINGS)},
+        )
+    assert response.status_code == 200, response.text
+    return response.json()["id"]
+
+
+def test_download_keeps_original_cyrillic_filename_and_gp_title(client):
+    job_id = _upload_named(client, "Кино — Группа крови.wav")
+    assert _wait_for_terminal_stage(client, job_id)["stage"] == "done"
+
+    response = client.get(f"/api/jobs/{job_id}/export.gp5")
+    assert response.status_code == 200
+    disposition = response.headers["content-disposition"]
+    expected = quote("Кино — Группа крови.gp5")
+    assert f"filename*=utf-8''{expected}" in disposition
+
+    with tempfile.NamedTemporaryFile(suffix=".gp5", delete=False) as fh:
+        fh.write(response.content)
+        gp5_path = Path(fh.name)
+    try:
+        # GP5 has no Unicode strings; Cyrillic text is stored as cp1251 (see gp_export).
+        assert gp.parse(str(gp5_path), encoding="cp1251").title == "Кино — Группа крови"
+    finally:
+        gp5_path.unlink(missing_ok=True)
+
+
+def test_empty_upload_is_rejected_without_leaving_files(client, tmp_path):
+    response = client.post(
+        "/api/jobs",
+        files={"file": ("silence.wav", b"", "audio/wav")},
+        data={"settings": json.dumps(SETTINGS)},
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Файл пуст"
+    assert list((tmp_path / "jobs").iterdir()) == []
+
+
+def test_oversized_upload_is_rejected_while_streaming(client, tmp_path, monkeypatch):
+    # Bigger than the limit, but within the multipart slack, so the request
+    # passes the Content-Length pre-check and is caught by the streaming count.
+    monkeypatch.setattr(upload_api, "MAX_UPLOAD_BYTES", 1000)
+    response = client.post(
+        "/api/jobs",
+        files={"file": ("big.wav", b"x" * 5000, "audio/wav")},
+        data={"settings": json.dumps(SETTINGS)},
+    )
+    assert response.status_code == 413
+    assert "слишком большой" in response.json()["detail"]
+    assert list((tmp_path / "jobs").iterdir()) == []
+
+
+def test_oversized_upload_is_rejected_by_content_length(client, monkeypatch):
+    monkeypatch.setattr(upload_api, "MAX_UPLOAD_BYTES", 10)
+    response = client.post(
+        "/api/jobs",
+        files={"file": ("big.wav", b"x" * 200_000, "audio/wav")},
+        data={"settings": json.dumps(SETTINGS)},
+    )
+    assert response.status_code == 413
+
+
+@pytest.mark.parametrize(
+    ("overrides", "fragment"),
+    [
+        ({"capo": 13}, "каподастр — значение должно быть не больше 12"),
+        ({"capo": -1}, "каподастр — значение должно быть не меньше 0"),
+        ({"tuning": ["E2", "A2", "D3"]}, "строй — нужно минимум 4 струны"),
+        ({"tuning": ["E2"] * 9}, "строй — допускается максимум 8 струн"),
+        ({"tuning": ["E2", "A2", "H3", "G3", "B3", "E4"]}, "струна 3: «H3» — не нота"),
+        ({"tuning": ["E2", "A2", "D3", "G3", "B3", "E7"]}, "струна 6: нота E7 вне допустимого диапазона"),
+    ],
+)
+def test_invalid_settings_get_a_readable_russian_422(client, overrides, fragment):
+    with FIXTURE.open("rb") as fh:
+        response = client.post(
+            "/api/jobs",
+            files={"file": ("a.wav", fh, "audio/wav")},
+            data={"settings": json.dumps({**SETTINGS, **overrides})},
+        )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert isinstance(detail, str)
+    assert detail.startswith("Некорректные настройки: ")
+    assert fragment in detail
+
+
+def test_malformed_settings_json_is_a_readable_422(client):
+    with FIXTURE.open("rb") as fh:
+        response = client.post(
+            "/api/jobs",
+            files={"file": ("a.wav", fh, "audio/wav")},
+            data={"settings": "{not json"},
+        )
+    assert response.status_code == 422
+    assert "не удалось разобрать JSON" in response.json()["detail"]
+
+
+def test_delete_job(client, tmp_path):
+    job_id = _upload(client)
+    assert _wait_for_terminal_stage(client, job_id)["stage"] == "done"
+    assert (tmp_path / "jobs" / job_id).exists()
+
+    assert client.delete(f"/api/jobs/{job_id}").status_code == 204
+    assert not (tmp_path / "jobs" / job_id).exists()
+    assert client.get(f"/api/jobs/{job_id}").status_code == 404
+    assert client.delete(f"/api/jobs/{job_id}").status_code == 404
+
+
+def test_delete_running_job_is_refused(client, monkeypatch):
+    release = threading.Event()
+
+    def blocking_separate(audio_path, output_path, *, device="cpu"):
+        release.wait(timeout=30)
+        output_path.write_bytes(Path(audio_path).read_bytes())
+        return output_path
+
+    monkeypatch.setattr(manager_module.separation, "separate_guitar_stem", blocking_separate)
+    job_id = _upload(client)
+    try:
+        response = client.delete(f"/api/jobs/{job_id}")
+        assert response.status_code == 409
+        assert "выполняется" in response.json()["detail"]
+    finally:
+        release.set()
+    assert _wait_for_terminal_stage(client, job_id)["stage"] == "done"

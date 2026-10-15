@@ -1,13 +1,14 @@
-"""GET /api/jobs/{id} — job status, and /events — live progress via SSE."""
+"""GET /api/jobs/{id} — job status, /events — live progress via SSE, and
+DELETE /api/jobs/{id} — drop a finished job and its files."""
 
 from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from sse_starlette.sse import EventSourceResponse
 
-from ..jobs.manager import JobManager
+from ..jobs.manager import JobBusyError, JobManager
 from ..models import schemas
 
 _TERMINAL_STAGES = {"done", "error"}
@@ -22,6 +23,16 @@ def get_router(manager: JobManager) -> APIRouter:
         if job is None:
             raise HTTPException(status_code=404, detail="Задача не найдена")
         return job.status
+
+    @router.delete("/{job_id}", status_code=204)
+    async def delete_job(job_id: str) -> Response:
+        try:
+            manager.delete(job_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Задача не найдена") from None
+        except JobBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return Response(status_code=204)
 
     @router.get("/{job_id}/events")
     async def stream_events(job_id: str, request: Request) -> EventSourceResponse:

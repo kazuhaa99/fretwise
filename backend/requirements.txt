@@ -19,6 +19,9 @@ torchaudio==2.5.1
 
 # Pitch / note transcription
 basic-pitch[onnx]==0.4.0
+# basic-pitch (and its resampy dependency) still import `pkg_resources`, which
+# setuptools removed in v81 — without this pin a fresh install fails on import.
+setuptools<81
 
 # Guitar Pro export
 PyGuitarPro==0.10
