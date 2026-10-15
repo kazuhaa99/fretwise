@@ -434,3 +434,31 @@ def test_revert_restores_the_pipeline_output(client):
 
 def test_editing_requires_a_finished_job(client):
     assert client.put("/api/jobs/nope/tab", json={"baseRevision": 0, "tracks": []}).status_code == 404
+
+
+def test_text_and_midi_exports_follow_edits(client):
+    job_id = _upload_named(client, "Мой рифф.wav")
+    assert _wait_for_terminal_stage(client, job_id)["stage"] == "done"
+    result = client.get(f"/api/jobs/{job_id}/result").json()
+    assert result["txtUrl"] == f"/api/jobs/{job_id}/export.txt"
+    assert result["midiUrl"] == f"/api/jobs/{job_id}/export.mid"
+
+    text = client.get(result["txtUrl"])
+    assert text.status_code == 200
+    assert text.headers["content-type"].startswith("text/plain")
+    assert f"filename*=utf-8''{quote('Мой рифф.txt')}" in text.headers["content-disposition"]
+    assert "e|" in text.text and "E|" in text.text
+
+    midi = client.get(result["midiUrl"])
+    assert midi.status_code == 200
+    assert midi.content[:4] == b"MThd"
+
+    # Edit: every note to fret 21 — unusual enough to find in the text export.
+    tracks = copy.deepcopy(result["tab"]["tracks"])
+    for event in tracks[0]["events"]:
+        for note in event["notes"]:
+            note["fret"] = 21
+    assert client.put(f"/api/jobs/{job_id}/tab", json={"baseRevision": 0, "tracks": tracks}).status_code == 200
+    edited_text = client.get(result["txtUrl"]).text
+    assert "21" in edited_text and edited_text != text.text
+    assert client.get(result["midiUrl"]).content != midi.content

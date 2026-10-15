@@ -22,7 +22,8 @@ The resulting tab plays back in the browser with a cursor synced to the audio, a
 - Keyboard shortcuts (Space, ←/→, L, +/−, M, C, G, ?) with an in-app list
 - Light and dark themes («Шалфей» palette, WCAG AA contrast), usable from a 375 px phone to a wide monitor
 - The job lives in the URL (`?job=…`), so a reload brings you back to the same progress screen or result
-- **Export to Guitar Pro** (`.gp5`) via PyGuitarPro
+- **Fix notes in the browser**: change fret or string, delete or add notes, undo/redo (Ctrl+Z / Ctrl+Shift+Z); edits are saved on the server and every export includes them
+- **Export** to Guitar Pro (`.gp5`, via PyGuitarPro), plain-text ASCII tab (`.txt`) and Standard MIDI (`.mid`), all on the same bar grid
 - One-command **Docker Compose** setup
 
 ## Screens
@@ -54,6 +55,10 @@ More in [`docs/screenshots/`](docs/screenshots). They are generated from the pro
 | `GET` | `/api/jobs/{id}/result` | Tab data (tracks, bars, beats, tempo, meter) and file URLs |
 | `GET` | `/api/jobs/{id}/audio/{original\|guitar}` | Audio for playback (supports range requests) |
 | `GET` | `/api/jobs/{id}/export.gp5` | Guitar Pro file named after the upload |
+| `GET` | `/api/jobs/{id}/export.txt` | Plain-text (ASCII) tab |
+| `GET` | `/api/jobs/{id}/export.mid` | Standard MIDI File |
+| `PUT` | `/api/jobs/{id}/tab` | Save edited tracks (`baseRevision` + `tracks`); 409 if edited elsewhere |
+| `DELETE` | `/api/jobs/{id}/edits` | Revert to the tab as transcribed |
 | `DELETE` | `/api/jobs/{id}` | Delete a finished job and its files |
 
 ## Tech stack

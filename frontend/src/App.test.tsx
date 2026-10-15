@@ -49,6 +49,8 @@ const result: JobResult = {
   originalAudioUrl: `/api/jobs/${JOB_ID}/audio/original`,
   guitarAudioUrl: `/api/jobs/${JOB_ID}/audio/guitar`,
   gp5Url: `/api/jobs/${JOB_ID}/export.gp5`,
+  txtUrl: `/api/jobs/${JOB_ID}/export.txt`,
+  midiUrl: `/api/jobs/${JOB_ID}/export.mid`,
 };
 
 type Route = (url: string, init?: RequestInit) => Response | Promise<Response>;
@@ -84,7 +86,10 @@ describe("restoring a job from ?job=", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Группа крови" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /Скачать \.gp5/ })).toHaveAttribute("href", `/api/jobs/${JOB_ID}/export.gp5`);
+    fireEvent.click(screen.getByRole("button", { name: /Скачать/ }));
+    expect(screen.getByRole("link", { name: /Guitar Pro \(\.gp5\)/ })).toHaveAttribute("href", `/api/jobs/${JOB_ID}/export.gp5`);
+    expect(screen.getByRole("link", { name: /Текстовые табы/ })).toHaveAttribute("href", `/api/jobs/${JOB_ID}/export.txt`);
+    expect(screen.getByRole("link", { name: /MIDI/ })).toHaveAttribute("href", `/api/jobs/${JOB_ID}/export.mid`);
     expect(window.location.search).toBe(`?job=${JOB_ID}`);
   });
 

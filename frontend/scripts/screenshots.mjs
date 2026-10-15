@@ -83,6 +83,8 @@ const result = {
   originalAudioUrl: `/api/jobs/${JOB}/audio/original`,
   guitarAudioUrl: `/api/jobs/${JOB}/audio/guitar`,
   gp5Url: `/api/jobs/${JOB}/export.gp5`,
+  txtUrl: `/api/jobs/${JOB}/export.txt`,
+  midiUrl: `/api/jobs/${JOB}/export.mid`,
 };
 
 // 1 s of silence, 8 kHz mono PCM — enough for the <audio> element to load.
@@ -211,6 +213,11 @@ await shot("edit-phone-dark", {
     await page.getByRole("button", { name: "Править" }).click();
     await page.locator('[data-note="2:0"]').click();
   },
+});
+await shot("downloads-desktop-light", {
+  viewport: DESKTOP,
+  query: `?job=${JOB}`,
+  prepare: async (page) => page.getByRole("button", { name: /Скачать/ }).click(),
 });
 await shot("shortcuts-desktop-dark", {
   viewport: DESKTOP,

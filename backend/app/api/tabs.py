@@ -8,9 +8,13 @@ import asyncio
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
+from urllib.parse import quote
+
+from fastapi.responses import FileResponse, Response
 
 from ..jobs import edits
+from ..pipeline.midi_export import export_midi
+from ..pipeline.text_export import export_text
 from ..jobs.manager import JobBusyError, JobManager
 from ..models import schemas
 
@@ -38,6 +42,31 @@ def get_router(manager: JobManager) -> APIRouter:
         job = _require_done_job(job_id)
         assert job.result is not None
         return job.result
+
+    def _attachment(filename: str) -> dict[str, str]:
+        # RFC 5987 form for non-ASCII names (Cyrillic titles), like FileResponse.
+        quoted = quote(filename)
+        if quoted == filename:
+            return {"content-disposition": f'attachment; filename="{filename}"'}
+        return {"content-disposition": f"attachment; filename*=utf-8''{quoted}"}
+
+    @router.get("/{job_id}/export.txt")
+    async def download_text(job_id: str) -> Response:
+        """Plain-text tab of the current (possibly edited) tab."""
+        job = _require_done_job(job_id)
+        assert job.result is not None
+        tab = job.result.tab
+        text = export_text(tab, title=job.title, grid=edits.grid_from_tab(tab))
+        return Response(text, media_type="text/plain; charset=utf-8", headers=_attachment(f"{job.title}.txt"))
+
+    @router.get("/{job_id}/export.mid")
+    async def download_midi(job_id: str) -> Response:
+        """Standard MIDI file of the current (possibly edited) tab."""
+        job = _require_done_job(job_id)
+        assert job.result is not None
+        tab = job.result.tab
+        data = export_midi(tab, title=job.title, grid=edits.grid_from_tab(tab))
+        return Response(data, media_type="audio/midi", headers=_attachment(f"{job.title}.mid"))
 
     @router.put("/{job_id}/tab", response_model=schemas.JobResult)
     async def save_tab(job_id: str, body: schemas.TabEditRequest) -> schemas.JobResult:

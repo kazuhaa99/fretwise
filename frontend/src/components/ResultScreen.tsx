@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { JobResult, TabTrack } from "../types";
-import { gp5DownloadUrl } from "../api/client";
 import { barSpans } from "../lib/barLayout";
 import { useHotkeys } from "../lib/hotkeys";
 import { PlaybackEngine, type PlaybackState, type Source } from "../lib/playback";
@@ -12,7 +11,8 @@ import EditToolbar from "./EditToolbar";
 import PlayerBar from "./PlayerBar";
 import ShortcutsDialog from "./ShortcutsDialog";
 import TabSheet, { type BarRange } from "./TabSheet";
-import { DownloadIcon, KeyboardIcon, PencilIcon } from "./icons";
+import { KeyboardIcon, PencilIcon } from "./icons";
+import DownloadMenu from "./DownloadMenu";
 import { Button, IconButton, Segmented } from "./ui";
 
 const PLAYER_INSET = 160; // generous: the phone player is taller than the desktop one
@@ -254,13 +254,7 @@ export default function ResultScreen({ result, onReset }: Props) {
           >
             {editing ? "Правка" : "Править"}
           </Button>
-          <a
-            href={gp5DownloadUrl(result.job.id)}
-            download
-            className="inline-flex min-h-11 items-center gap-2 rounded-md border border-line-strong bg-surface px-4 text-[15px] font-semibold text-fg transition-colors hover:border-accent hover:text-accent-strong"
-          >
-            <DownloadIcon /> Скачать .gp5
-          </a>
+          <DownloadMenu result={result} />
           <span className="hidden sm:block">
             <IconButton label="Горячие клавиши" onClick={() => setHelpOpen(true)}>
               <KeyboardIcon />

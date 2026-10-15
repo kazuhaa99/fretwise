@@ -72,4 +72,6 @@ export interface JobResult {
   originalAudioUrl: string;
   guitarAudioUrl: string;
   gp5Url: string;
+  txtUrl: string; // plain-text (ASCII) tab
+  midiUrl: string; // Standard MIDI File
 }

@@ -147,6 +147,8 @@ class JobResult(BaseModel):
     original_audio_url: str = Field(alias="originalAudioUrl")
     guitar_audio_url: str = Field(alias="guitarAudioUrl")
     gp5_url: str = Field(alias="gp5Url")
+    txt_url: str = Field("", alias="txtUrl")  # plain-text (ASCII) tab
+    midi_url: str = Field("", alias="midiUrl")  # Standard MIDI File
 
 
 class TabEditRequest(BaseModel):

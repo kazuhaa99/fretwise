@@ -672,6 +672,8 @@ def _build_result(
         original_audio_url=f"/api/jobs/{job.id}/audio/original",
         guitar_audio_url=f"/api/jobs/{job.id}/audio/guitar",
         gp5_url=f"/api/jobs/{job.id}/export.gp5",
+        txt_url=f"/api/jobs/{job.id}/export.txt",
+        midi_url=f"/api/jobs/{job.id}/export.mid",
     )
 
 
