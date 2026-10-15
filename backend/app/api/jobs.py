@@ -1,5 +1,6 @@
-"""GET /api/jobs/{id} — job status, /events — live progress via SSE, and
-DELETE /api/jobs/{id} — drop a finished job and its files."""
+"""GET /api/jobs/{id} — job status, /events — live progress via SSE,
+POST /api/jobs/{id}/cancel — stop a job, and DELETE /api/jobs/{id} — drop a
+finished job and its files."""
 
 from __future__ import annotations
 
@@ -8,10 +9,9 @@ import asyncio
 from fastapi import APIRouter, HTTPException, Request, Response
 from sse_starlette.sse import EventSourceResponse
 
-from ..jobs.manager import JobBusyError, JobManager
+from ..jobs.manager import TERMINAL_STAGES, JobBusyError, JobFinishedError, JobManager
 from ..models import schemas
 
-_TERMINAL_STAGES = {"done", "error"}
 
 
 def get_router(manager: JobManager) -> APIRouter:
@@ -23,6 +23,15 @@ def get_router(manager: JobManager) -> APIRouter:
         if job is None:
             raise HTTPException(status_code=404, detail="Задача не найдена")
         return job.status
+
+    @router.post("/{job_id}/cancel", response_model=schemas.JobStatus)
+    async def cancel_job(job_id: str) -> schemas.JobStatus:
+        try:
+            return manager.cancel(job_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Задача не найдена") from None
+        except JobFinishedError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @router.delete("/{job_id}", status_code=204)
     async def delete_job(job_id: str) -> Response:
@@ -51,7 +60,7 @@ def get_router(manager: JobManager) -> APIRouter:
                     except asyncio.TimeoutError:
                         continue
                     yield {"data": status.model_dump_json()}
-                    if status.stage in _TERMINAL_STAGES:
+                    if status.stage in TERMINAL_STAGES:
                         return
             finally:
                 job.unsubscribe(queue)

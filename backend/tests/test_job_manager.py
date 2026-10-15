@@ -287,3 +287,103 @@ def test_importing_the_app_needs_neither_torch_nor_network():
     )
     result = subprocess.run([sys.executable, "-c", code], cwd=BACKEND_ROOT, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+# -- cancellation, ETA, queue position ---------------------------------------
+
+def test_cancelling_a_queued_job_is_immediate(tmp_path, monkeypatch):
+    release = asyncio.Event()
+
+    async def blocking_pipeline(job):
+        await release.wait()
+        job.publish(stage="done", progress=1.0, message="Готово!")
+
+    monkeypatch.setattr(manager_module, "_run_pipeline", blocking_pipeline)
+
+    async def scenario():
+        manager = JobManager(tmp_path, max_concurrent_jobs=1)
+        running = await manager.submit(filename="a.wav", chunks=_chunks(b"a"), settings=SETTINGS, max_bytes=10)
+        first = await manager.submit(filename="b.wav", chunks=_chunks(b"b"), settings=SETTINGS, max_bytes=10)
+        second = await manager.submit(filename="c.wav", chunks=_chunks(b"c"), settings=SETTINGS, max_bytes=10)
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert first.status.queue_position == 1
+        assert second.status.queue_position == 2
+
+        status = manager.cancel(first.id)
+        assert status.stage == "cancelled"
+        assert not first.work_dir.exists()
+        # The job behind it moves up.
+        assert second.status.queue_position == 1
+
+        release.set()
+        await asyncio.gather(*list(manager._tasks), return_exceptions=True)
+        assert running.status.stage == "done"
+        assert second.status.stage == "done"
+        assert first.status.stage == "cancelled"
+        with pytest.raises(manager_module.JobFinishedError):
+            manager.cancel(first.id)
+
+    asyncio.run(scenario())
+
+
+def test_cancelling_a_running_job_stops_after_the_current_step(tmp_path, monkeypatch):
+    step_started = asyncio.Event()
+    finish_step = asyncio.Event()
+    reached_next_step = False
+
+    async def pipeline_with_checkpoint(job):
+        nonlocal reached_next_step
+        try:
+            job.publish(stage="separating", progress=0.3, message="Выделяем гитару")
+            step_started.set()
+            await finish_step.wait()  # the uninterruptible step
+            job.check_cancelled()
+            reached_next_step = True
+            job.publish(stage="done", progress=1.0, message="Готово!")
+        except manager_module.JobCancelled:
+            job.publish(stage="cancelled", progress=job.status.progress, message=manager_module.CANCELLED_MESSAGE)
+
+    monkeypatch.setattr(manager_module, "_run_pipeline", pipeline_with_checkpoint)
+
+    async def scenario():
+        manager = JobManager(tmp_path)
+        job = await manager.submit(filename="a.wav", chunks=_chunks(b"a"), settings=SETTINGS, max_bytes=10)
+        await step_started.wait()
+
+        status = manager.cancel(job.id)
+        assert status.stage == "separating"  # still working on the current step
+        assert status.cancel_requested
+        assert status.message == manager_module.CANCELLING_MESSAGE
+        assert manager.cancel(job.id).cancel_requested  # idempotent
+
+        finish_step.set()
+        await asyncio.gather(*list(manager._tasks))
+        assert not reached_next_step
+        assert job.status.stage == "cancelled"
+        assert not job.status.cancel_requested
+        assert not job.work_dir.exists()
+        assert manager.get(job.id) is not None  # status keeps answering
+
+    asyncio.run(scenario())
+
+
+def test_eta_counts_down_through_the_remaining_stages(tmp_path):
+    job = manager_module.Job(
+        id="x" * 32, title="t", settings=SETTINGS, upload_path=tmp_path / "u.wav", work_dir=tmp_path,
+        status=schemas.JobStatus(id="x" * 32, stage="queued", progress=0.0, message=""),
+    )
+    job.publish(stage="extracting_audio", progress=0.0, message="")
+    assert job.status.eta_seconds is None  # duration not known yet
+
+    job.duration_seconds = 100.0
+    est = manager_module.stage_estimates(100.0)
+    job.publish(stage="separating", progress=0.0, message="")
+    full = job.status.eta_seconds
+    assert full == pytest.approx(est["separating"] + est["transcribing"] + est["arranging"] + est["exporting"], abs=0.1)
+    job.publish(stage="separating", progress=0.5, message="")
+    assert job.status.eta_seconds == pytest.approx(full - est["separating"] / 2, abs=0.1)
+    job.publish(stage="exporting", progress=0.0, message="")
+    assert job.status.eta_seconds == pytest.approx(est["exporting"], abs=0.1)
+    job.publish(stage="done", progress=1.0, message="")
+    assert job.status.eta_seconds == 0.0

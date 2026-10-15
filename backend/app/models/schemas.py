@@ -22,6 +22,7 @@ JobStage = Literal[
     "exporting",
     "done",
     "error",
+    "cancelled",
 ]
 
 Technique = Literal["hammer_on", "pull_off", "slide", "bend", "vibrato", "palm_mute", "tremolo"]
@@ -30,11 +31,19 @@ _camel_config = ConfigDict(populate_by_name=True)
 
 
 class JobStatus(BaseModel):
+    model_config = _camel_config
+
     id: str
     stage: JobStage
     progress: float = Field(ge=0.0, le=1.0)
     message: str
     error: Optional[str] = None
+    # 1-based place in line while stage == "queued" and every worker is busy.
+    queue_position: Optional[int] = Field(None, alias="queuePosition")
+    # Rough seconds until done; None until the audio's duration is known.
+    eta_seconds: Optional[float] = Field(None, alias="etaSeconds")
+    # The user asked to cancel; the job stops after its current step.
+    cancel_requested: bool = Field(False, alias="cancelRequested")
 
 
 # Bounds for a believable open-string pitch. The low end leaves room for
@@ -119,6 +128,9 @@ class TabData(BaseModel):
     # Start time (seconds) of every bar, matching the .gp5 export exactly. The
     # first may be negative when a pickup bar begins before the audio does.
     measure_times: list[float] = Field(default_factory=list, alias="measureTimes")
+    # Every beat (seconds) from the first bar to the last, on the same grid —
+    # what the metronome clicks on and what places notes inside a bar.
+    beat_times: list[float] = Field(default_factory=list, alias="beatTimes")
     tracks: list[TabTrack]
 
 
@@ -126,6 +138,7 @@ class JobResult(BaseModel):
     model_config = _camel_config
 
     job: JobStatus
+    title: str = ""  # sanitized original filename, as used for the .gp5
     tab: TabData
     original_audio_url: str = Field(alias="originalAudioUrl")
     guitar_audio_url: str = Field(alias="guitarAudioUrl")

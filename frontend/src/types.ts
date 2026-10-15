@@ -6,7 +6,8 @@ export type JobStage =
   | "arranging"
   | "exporting"
   | "done"
-  | "error";
+  | "error"
+  | "cancelled";
 
 export interface JobStatus {
   id: string;
@@ -14,6 +15,9 @@ export interface JobStatus {
   progress: number; // 0..1 within the current stage
   message: string;
   error?: string | null;
+  queuePosition?: number | null; // 1-based place in line while queued and all workers are busy
+  etaSeconds?: number | null; // rough seconds until done; null until the audio duration is known
+  cancelRequested?: boolean; // cancel asked for; the job stops after its current step
 }
 
 export interface TabSettings {
@@ -55,11 +59,13 @@ export interface TabData {
   durationSeconds: number;
   beatsPerMeasure: number; // 3 or 4 — detected meter, same as in the .gp5
   measureTimes: number[]; // start of every bar in seconds (first may be negative: pickup)
+  beatTimes: number[]; // every beat in seconds on the same grid (metronome, placement within a bar)
   tracks: TabTrack[];
 }
 
 export interface JobResult {
   job: JobStatus;
+  title: string; // sanitized original filename, as used for the .gp5
   tab: TabData;
   originalAudioUrl: string;
   guitarAudioUrl: string;

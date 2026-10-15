@@ -68,7 +68,14 @@ _JOB_DIR_RE = re.compile(r"^[0-9a-f]{32}$")
 
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
 
-_TERMINAL_STAGES = frozenset({"done", "error"})
+TERMINAL_STAGES = frozenset({"done", "error", "cancelled"})
+_TERMINAL_STAGES = TERMINAL_STAGES
+
+# Order of the pipeline's working stages, for the remaining-time estimate.
+_WORK_STAGES = ("extracting_audio", "separating", "transcribing", "arranging", "exporting")
+
+CANCELLING_MESSAGE = "Отменяем после текущего шага…"
+CANCELLED_MESSAGE = "Обработка остановлена"
 
 # Coarse elapsed-time-vs-estimate progress for stages with no progress hook in
 # the underlying library (see `separation.py`'s docstring on why this can't be
@@ -96,6 +103,30 @@ class UploadTooLargeError(JobError):
 
 class JobBusyError(JobError):
     """The job is still queued or running, so it can't be deleted yet."""
+
+
+class JobFinishedError(JobError):
+    """The job already reached a terminal stage, so there is nothing to cancel."""
+
+
+class JobCancelled(Exception):
+    """Raised at a pipeline checkpoint once the user has asked to cancel."""
+
+
+def stage_estimates(duration_seconds: float) -> dict[str, float]:
+    """Rough wall-clock seconds per stage for a clip of `duration_seconds`.
+
+    Same multipliers that drive the progress bars, so the remaining-time
+    estimate and the bars never disagree. Extraction is already over by the
+    time the duration is known; it's listed for completeness.
+    """
+    return {
+        "extracting_audio": 2.0,
+        "separating": max(20.0, duration_seconds * _SEPARATION_SECONDS_PER_AUDIO_SECOND),
+        "transcribing": max(8.0, duration_seconds * _TRANSCRIPTION_SECONDS_PER_AUDIO_SECOND),
+        "arranging": 1.0 + duration_seconds * 0.01,
+        "exporting": 2.0 + duration_seconds * 0.02,
+    }
 
 
 def sanitize_title(filename: str) -> str:
@@ -154,21 +185,54 @@ class Job:
     work_dir: Path
     status: schemas.JobStatus
     result: Optional[schemas.JobResult] = None
-    finished_at: Optional[float] = None  # `time.monotonic()` when it reached done/error
+    finished_at: Optional[float] = None  # `time.monotonic()` when it reached a terminal stage
+    duration_seconds: Optional[float] = None  # of the decoded audio, once known
+    cancel_requested: bool = False
     _subscribers: list[asyncio.Queue] = field(default_factory=list)
 
     @property
     def is_finished(self) -> bool:
         return self.status.stage in _TERMINAL_STAGES
 
-    def publish(self, *, stage: schemas.JobStage, progress: float, message: str, error: Optional[str] = None) -> None:
+    def publish(
+        self,
+        *,
+        stage: schemas.JobStage,
+        progress: float,
+        message: str,
+        error: Optional[str] = None,
+        queue_position: Optional[int] = None,
+    ) -> None:
+        progress = max(0.0, min(1.0, progress))
+        if self.cancel_requested and stage not in _TERMINAL_STAGES:
+            message = CANCELLING_MESSAGE
         self._emit(schemas.JobStatus(
             id=self.id,
             stage=stage,
-            progress=max(0.0, min(1.0, progress)),
+            progress=progress,
             message=message,
             error=error,
+            queue_position=queue_position,
+            eta_seconds=self._eta(stage, progress),
+            cancel_requested=self.cancel_requested and stage not in _TERMINAL_STAGES,
         ))
+
+    def _eta(self, stage: str, progress: float) -> Optional[float]:
+        """Remaining seconds: what's left of this stage plus every later one."""
+        if stage in _TERMINAL_STAGES:
+            return 0.0 if stage == "done" else None
+        if self.duration_seconds is None or stage not in _WORK_STAGES:
+            return None
+        estimates = stage_estimates(self.duration_seconds)
+        index = _WORK_STAGES.index(stage)
+        remaining = estimates[stage] * (1.0 - progress)
+        remaining += sum(estimates[later] for later in _WORK_STAGES[index + 1:])
+        return round(remaining, 1)
+
+    def check_cancelled(self) -> None:
+        """Pipeline checkpoint between steps (see `JobManager.cancel`)."""
+        if self.cancel_requested:
+            raise JobCancelled()
 
     def _emit(self, status: schemas.JobStatus) -> None:
         """Push a fully-built status to `self.status` and every subscriber.
@@ -228,6 +292,7 @@ class JobManager:
         # warning in the `asyncio.create_task` docs). Holding them here until
         # they finish is the documented fix.
         self._tasks: set[asyncio.Task] = set()
+        self._job_tasks: dict[str, asyncio.Task] = {}
         self._purge_task: Optional[asyncio.Task] = None
 
     # -- lifecycle -----------------------------------------------------------
@@ -337,8 +402,50 @@ class JobManager:
         self._jobs[job_id] = job
         task = asyncio.create_task(self._run(job))
         self._tasks.add(task)
+        self._job_tasks[job_id] = task
         task.add_done_callback(self._tasks.discard)
+        task.add_done_callback(lambda _t, job_id=job_id: self._job_tasks.pop(job_id, None))
         return job
+
+    def cancel(self, job_id: str) -> schemas.JobStatus:
+        """Cancel a job on the user's request (`POST /api/jobs/{id}/cancel`).
+
+        A job still waiting in line is cancelled immediately. A running one
+        can't be interrupted mid-step — Demucs and Basic Pitch run in worker
+        threads, and Python threads can't be stopped from outside — so it is
+        flagged and stops at the next checkpoint between pipeline steps
+        (`Job.check_cancelled`). Every status it publishes meanwhile says so
+        ("Отменяем после текущего шага…"), and its files are removed once it
+        stops.
+        """
+        job = self._jobs.get(job_id)
+        if job is None:
+            raise KeyError(job_id)
+        if job.is_finished:
+            raise JobFinishedError("Задача уже завершена — отменять нечего")
+        if job.cancel_requested:
+            return job.status
+
+        job.cancel_requested = True
+        if job in self._waiting:
+            task = self._job_tasks.get(job_id)
+            if task is not None:
+                task.cancel()
+            self._finish_cancelled(job)
+        else:
+            current = job.status
+            job.publish(stage=current.stage, progress=current.progress, message=CANCELLING_MESSAGE)
+        return job.status
+
+    def _finish_cancelled(self, job: Job) -> None:
+        if job in self._waiting:
+            self._waiting.remove(job)
+            self._announce_queue_positions()
+        if not job.is_finished:
+            job.publish(stage="cancelled", progress=job.status.progress, message=CANCELLED_MESSAGE)
+        # Keep the job (so its status keeps answering "cancelled") but not its
+        # files; the TTL sweep forgets the record later like any finished job.
+        shutil.rmtree(job.work_dir, ignore_errors=True)
 
     def delete(self, job_id: str) -> None:
         """Delete a finished job on the user's request (`DELETE /api/jobs/{id}`).
@@ -369,6 +476,11 @@ class JobManager:
                 self._waiting.remove(job)
                 self._announce_queue_positions()
                 await _run_pipeline(job)
+            if job.status.stage == "cancelled":
+                self._finish_cancelled(job)
+        except asyncio.CancelledError:
+            # Only `cancel()` cancels these tasks, and only while queued.
+            self._finish_cancelled(job)
         finally:
             if job in self._waiting:
                 self._waiting.remove(job)
@@ -383,9 +495,9 @@ class JobManager:
         for position, job in enumerate(self._waiting, start=1):
             if self._semaphore.locked():
                 message = f"В очереди: позиция {position}. Начнём, как только освободится обработчик"
+                job.publish(stage="queued", progress=0.0, message=message, queue_position=position)
             else:
-                message = "В очереди на обработку"
-            job.publish(stage="queued", progress=0.0, message=message)
+                job.publish(stage="queued", progress=0.0, message="В очереди на обработку")
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +511,8 @@ async def _run_pipeline(job: Job) -> None:
         job.publish(stage="extracting_audio", progress=1.0, message="Звук извлечён")
 
         duration_seconds = await _run_blocking(ingest.audio_duration_seconds, job.extracted_audio_path)
+        job.duration_seconds = duration_seconds
+        job.check_cancelled()
 
         await _run_with_estimated_progress(
             job,
@@ -409,6 +523,8 @@ async def _run_pipeline(job: Job) -> None:
             args=(job.extracted_audio_path, job.guitar_stem_path),
         )
 
+        job.check_cancelled()
+
         notes = await _run_with_estimated_progress(
             job,
             stage="transcribing",
@@ -417,6 +533,8 @@ async def _run_pipeline(job: Job) -> None:
             fn=transcription.transcribe_notes,
             args=(job.guitar_stem_path,),
         )
+
+        job.check_cancelled()
 
         job.publish(stage="arranging", progress=0.0, message="Раскладываем ноты по грифу")
         fretboard = Fretboard.from_note_names(job.settings.tuning, capo=job.settings.capo)
@@ -428,6 +546,8 @@ async def _run_pipeline(job: Job) -> None:
             position_jump_weight=job.settings.position_jump_weight,
         )
         job.publish(stage="arranging", progress=1.0, message="Аппликатура подобрана")
+
+        job.check_cancelled()
 
         job.publish(stage="exporting", progress=0.0, message="Собираем файл для Guitar Pro")
         samples, sample_rate = await _run_blocking(_load_mono_samples, job.guitar_stem_path)
@@ -444,12 +564,14 @@ async def _run_pipeline(job: Job) -> None:
 
         # Build the result *before* announcing "done" — otherwise a client could
         # see the terminal status over SSE and request /result before it exists.
-        final_status = schemas.JobStatus(id=job.id, stage="done", progress=1.0, message="Готово!")
+        final_status = schemas.JobStatus(id=job.id, stage="done", progress=1.0, message="Готово!", eta_seconds=0.0)
         job.result = _build_result(
             job, status=final_status, tracks=tracks, layout=layout, duration_seconds=duration_seconds
         )
         job._emit(final_status)
 
+    except JobCancelled:
+        job.publish(stage="cancelled", progress=job.status.progress, message=CANCELLED_MESSAGE)
     except JobError as exc:
         job.publish(stage="error", progress=job.status.progress, message="Не получилось обработать файл", error=str(exc))
     except Exception as exc:  # noqa: BLE001 - surfacing the real cause to the user beats a generic 500 page
@@ -468,6 +590,7 @@ def _build_result(
         # The exact bar lines written to the .gp5, so the in-browser tab and
         # the downloaded file agree on where every measure starts.
         measure_times=[round(t, 4) for t in layout.measure_start_times()],
+        beat_times=[round(t, 4) for t in layout.beat_times()],
         tracks=[
             schemas.TabTrack(
                 name=gp_export.track_name(index, len(tracks)),
@@ -493,6 +616,7 @@ def _build_result(
     )
     return schemas.JobResult(
         job=status,
+        title=job.title,
         tab=tab,
         original_audio_url=f"/api/jobs/{job.id}/audio/original",
         guitar_audio_url=f"/api/jobs/{job.id}/audio/guitar",

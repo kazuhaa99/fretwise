@@ -33,6 +33,7 @@ const status = (stage: JobStatus["stage"], extra: Partial<JobStatus> = {}): JobS
 
 const result: JobResult = {
   job: status("done", { progress: 1 }),
+  title: "Группа крови",
   tab: {
     tuning: ["E2", "A2", "D3", "G3", "B3", "E4"],
     capo: 0,
@@ -40,6 +41,7 @@ const result: JobResult = {
     durationSeconds: 4,
     beatsPerMeasure: 4,
     measureTimes: [0, 2],
+    beatTimes: [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5],
     tracks: [{ name: "Guitar", events: [{ time: 0.5, duration: 0.5, notes: [{ string: 0, fret: 3 }] }] }],
   },
   originalAudioUrl: `/api/jobs/${JOB_ID}/audio/original`,

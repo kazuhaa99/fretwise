@@ -47,6 +47,12 @@ def stub_separation(monkeypatch):
 
 @pytest.fixture
 def client(tmp_path):
+    # sse-starlette keeps a module-global exit event bound to the event loop
+    # that first used it; every TestClient runs its own loop, so a second SSE
+    # test would otherwise fail with "bound to a different event loop".
+    from sse_starlette.sse import AppStatus
+
+    AppStatus.should_exit_event = None
     app = create_app(jobs_root=tmp_path / "jobs")
     with TestClient(app) as test_client:
         yield test_client
@@ -291,3 +297,53 @@ def test_delete_running_job_is_refused(client, monkeypatch):
     finally:
         release.set()
     assert _wait_for_terminal_stage(client, job_id)["stage"] == "done"
+
+
+def test_result_carries_title_beats_and_status_fields(client):
+    job_id = _upload_named(client, "Мой рифф.wav")
+    assert _wait_for_terminal_stage(client, job_id)["stage"] == "done"
+    result = client.get(f"/api/jobs/{job_id}/result").json()
+    assert result["title"] == "Мой рифф"
+    tab = result["tab"]
+    assert tab["beatTimes"], "expected beat times for the metronome"
+    assert tab["beatTimes"] == sorted(tab["beatTimes"])
+    assert len(tab["beatTimes"]) == len(tab["measureTimes"]) * tab["beatsPerMeasure"]
+    assert tab["measureTimes"][0] == pytest.approx(tab["beatTimes"][0])
+    status = client.get(f"/api/jobs/{job_id}").json()
+    assert status["etaSeconds"] == 0.0
+    assert status["cancelRequested"] is False
+    assert "queuePosition" in status
+
+
+def test_cancel_running_job_over_http_ends_the_sse_stream(client, monkeypatch):
+    release = threading.Event()
+
+    def blocking_separate(audio_path, output_path, *, device="cpu"):
+        release.wait(timeout=30)
+        output_path.write_bytes(Path(audio_path).read_bytes())
+        return output_path
+
+    monkeypatch.setattr(manager_module.separation, "separate_guitar_stem", blocking_separate)
+    job_id = _upload(client)
+    deadline = time.monotonic() + 30
+    while client.get(f"/api/jobs/{job_id}").json()["stage"] != "separating":
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+
+    response = client.post(f"/api/jobs/{job_id}/cancel")
+    assert response.status_code == 200
+    assert response.json()["cancelRequested"] is True
+    assert response.json()["message"] == "Отменяем после текущего шага…"
+    release.set()
+
+    stages = []
+    with client.stream("GET", f"/api/jobs/{job_id}/events") as stream:
+        for line in stream.iter_lines():
+            if line.startswith("data:"):
+                stages.append(json.loads(line[5:].strip())["stage"])
+                if stages[-1] in ("done", "error", "cancelled"):
+                    break
+    assert stages[-1] == "cancelled"
+    assert "transcribing" not in stages
+    assert client.post(f"/api/jobs/{job_id}/cancel").status_code == 409
+    assert client.post("/api/jobs/nope/cancel").status_code == 404

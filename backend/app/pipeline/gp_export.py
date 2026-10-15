@@ -82,6 +82,11 @@ class Layout:
     def measure_start_times(self) -> list[float]:
         return self.grid.measure_start_times(self.lead_in_beats, self.measure_count)
 
+    def beat_times(self) -> list[float]:
+        """Start time of every beat in the song, pickup included."""
+        beats = self.measure_count * self.grid.beats_per_measure
+        return [self.grid.time_at(index - self.lead_in_beats) for index in range(beats)]
+
 
 def plan_layout(tracks: list[list[TabEvent]], grid: BeatGrid) -> Layout:
     """Size the song: pickup bars for anything before the first downbeat, then
