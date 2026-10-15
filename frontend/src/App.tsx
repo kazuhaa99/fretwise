@@ -3,7 +3,7 @@ import UploadDropzone from "./components/UploadDropzone";
 import SettingsPanel from "./components/SettingsPanel";
 import ProcessingTimeline from "./components/ProcessingTimeline";
 import TabViewer from "./components/TabViewer";
-import AudioPlayer, { type AudioPlayerHandle } from "./components/AudioPlayer";
+import AudioPlayer, { type AudioPlayerHandle, type TimeListener } from "./components/AudioPlayer";
 import {
   uploadJob,
   getJobResult,
@@ -15,13 +15,34 @@ import {
 } from "./api/client";
 import { DEFAULT_SETTINGS, type JobResult, type JobStatus, type TabSettings } from "./types";
 
-type View = "upload" | "processing" | "result";
+type View = "upload" | "restoring" | "processing" | "result";
+
+/**
+ * The current job lives in the URL (`?job=<id>`), so a page reload — or a
+ * bookmarked/shared link on the same machine — comes back to the same
+ * processing screen or result instead of an empty upload form. `replaceState`
+ * rather than `pushState`: the job isn't a separate page the Back button
+ * should step through.
+ */
+const JOB_PARAM = "job";
+
+function jobIdFromUrl(): string | null {
+  const id = new URLSearchParams(window.location.search).get(JOB_PARAM);
+  return id && /^[0-9a-f]{32}$/.test(id) ? id : null;
+}
+
+function setJobIdInUrl(jobId: string | null): void {
+  const url = new URL(window.location.href);
+  if (jobId) url.searchParams.set(JOB_PARAM, jobId);
+  else url.searchParams.delete(JOB_PARAM);
+  window.history.replaceState(window.history.state, "", url);
+}
 
 const JOB_GONE_MESSAGE =
   "Задача не найдена на сервере — возможно, он был перезапущен или задача удалена. Загрузи файл ещё раз.";
 
 export default function App() {
-  const [view, setView] = useState<View>("upload");
+  const [view, setView] = useState<View>(() => (jobIdFromUrl() ? "restoring" : "upload"));
   const [file, setFile] = useState<File | null>(null);
   const [settings, setSettings] = useState<TabSettings>(DEFAULT_SETTINGS);
   const [status, setStatus] = useState<JobStatus | null>(null);
@@ -30,7 +51,6 @@ export default function App() {
   // Lost contact with the job (backend down, job gone) — distinct from the
   // pipeline itself failing, which arrives as a normal `stage: "error"` status.
   const [connectionError, setConnectionError] = useState<string | null>(null);
-  const [currentTime, setCurrentTime] = useState(0);
   const playerRef = useRef<AudioPlayerHandle>(null);
   const esRef = useRef<EventSource | null>(null);
 
@@ -47,7 +67,7 @@ export default function App() {
     setResult(null);
     setError(null);
     setConnectionError(null);
-    setCurrentTime(0);
+    setJobIdInUrl(null);
   }, [closeStream]);
 
   const loadResult = useCallback(async (jobId: string) => {
@@ -56,6 +76,9 @@ export default function App() {
       setResult(res);
       setView("result");
     } catch (e) {
+      // Shown in the processing view's error box (with retry), which is also
+      // where a restore-from-URL lands when the result can't be fetched.
+      setView("processing");
       setConnectionError(isNotFound(e) ? JOB_GONE_MESSAGE : errorMessage(e, "Не удалось загрузить результат"));
     }
   }, []);
@@ -116,6 +139,7 @@ export default function App() {
       const job = await uploadJob(file, settings);
       setStatus(job);
       setView("processing");
+      setJobIdInUrl(job.id);
       watchJob(job.id);
     } catch (e) {
       const message = errorMessage(e, "Не удалось загрузить файл");
@@ -149,7 +173,44 @@ export default function App() {
     }
   }, [status, file, watchJob, startJob, reset]);
 
+  // Coming back to `?job=<id>` (reload, bookmark): pick up wherever that job is.
+  useEffect(() => {
+    const jobId = jobIdFromUrl();
+    if (!jobId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const current = await getJobStatus(jobId);
+        if (cancelled) return;
+        setStatus(current);
+        if (current.stage === "done") {
+          await loadResult(jobId);
+        } else {
+          setView("processing");
+          if (current.stage !== "error") watchJob(jobId);
+        }
+      } catch (e) {
+        if (cancelled) return;
+        setJobIdInUrl(null);
+        setView("upload");
+        setError(
+          isNotFound(e)
+            ? "Задача из ссылки больше не существует — её удалили или срок хранения истёк. Загрузи файл заново."
+            : errorMessage(e, "Не удалось восстановить задачу из ссылки"),
+        );
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [loadResult, watchJob]);
+
   useEffect(() => () => esRef.current?.close(), []);
+
+  const subscribeToPlayback = useCallback(
+    (listener: TimeListener) => playerRef.current?.subscribe(listener) ?? (() => {}),
+    [],
+  );
 
   const failed = status?.stage === "error" || connectionError !== null;
 
@@ -213,6 +274,12 @@ export default function App() {
           </div>
         )}
 
+        {view === "restoring" && (
+          <p className="text-center text-muted" role="status">
+            Загружаем задачу…
+          </p>
+        )}
+
         {view === "processing" && status && (
           <div className="mx-auto max-w-xl space-y-6">
             <ProcessingTimeline status={status} connectionError={connectionError} />
@@ -255,17 +322,16 @@ export default function App() {
             </div>
 
             <AudioPlayer
+              key={result.job.id}
               ref={playerRef}
               originalUrl={result.originalAudioUrl}
               guitarUrl={result.guitarAudioUrl}
-              onTimeUpdate={setCurrentTime}
-              onDuration={() => {}}
             />
 
             <TabViewer
               key={result.job.id}
               tab={result.tab}
-              currentTime={currentTime}
+              subscribe={subscribeToPlayback}
               onSeek={(t) => playerRef.current?.seekTo(t)}
             />
           </div>

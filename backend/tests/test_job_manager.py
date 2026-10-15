@@ -206,7 +206,9 @@ def test_purge_expired_only_removes_old_finished_jobs(tmp_path, instant_pipeline
         assert manager.purge_expired(now=job.finished_at + 3599) == []
         assert manager.get(job.id) is not None
 
-        assert manager.purge_expired(now=job.finished_at + 3600) == [job.id]
+        # Just past the TTL (not exactly on it: float subtraction of large
+        # monotonic timestamps can land a hair under 3600).
+        assert manager.purge_expired(now=job.finished_at + 3600.5) == [job.id]
         assert manager.get(job.id) is None
         assert not job.work_dir.exists()
 
