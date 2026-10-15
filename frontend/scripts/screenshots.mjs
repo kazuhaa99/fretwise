@@ -127,6 +127,16 @@ async function mockApi(page) {
         body: wav.subarray(start, end + 1),
       });
     }
+    if (url.endsWith("/api/jobs") && route.request().method() === "GET") {
+      const now = Date.now() / 1000;
+      return route.fulfill({
+        json: [
+          { id: JOB, title: "Кино — Группа крови (live)", stage: "done", createdAt: now - 1800, durationSeconds: 286, edited: true },
+          { id: "1".repeat(32), title: "Сплин — Выхода нет", stage: "done", createdAt: now - 90000, durationSeconds: 241, edited: false },
+          { id: "2".repeat(32), title: "repetition_take3", stage: "error", createdAt: now - 200000, edited: false, error: "Не удалось извлечь звук из файла" },
+        ],
+      });
+    }
     if (url.endsWith("/result")) return route.fulfill({ json: result });
     if (url.endsWith("/events")) {
       return route.fulfill({ status: 200, contentType: "text/event-stream", body: `data: ${JSON.stringify(jobStatus)}\n\n` });

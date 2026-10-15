@@ -22,6 +22,7 @@ The resulting tab plays back in the browser with a cursor synced to the audio, a
 - Keyboard shortcuts (Space, ←/→, L, +/−, M, C, G, ?) with an in-app list
 - Light and dark themes («Шалфей» palette, WCAG AA contrast), usable from a 375 px phone to a wide monitor
 - The job lives in the URL (`?job=…`), so a reload brings you back to the same progress screen or result
+- **Job history** on the start screen: previous transcriptions (with their edits) survive server restarts and open in one click; finished jobs expire after `FRETWISE_JOB_TTL_HOURS`
 - **Fix notes in the browser**: change fret or string, delete or add notes, undo/redo (Ctrl+Z / Ctrl+Shift+Z); edits are saved on the server and every export includes them
 - **Export** to Guitar Pro (`.gp5`, via PyGuitarPro), plain-text ASCII tab (`.txt`) and Standard MIDI (`.mid`), all on the same bar grid
 - One-command **Docker Compose** setup
@@ -48,6 +49,7 @@ More in [`docs/screenshots/`](docs/screenshots). They are generated from the pro
 
 | Method | Path | Purpose |
 |---|---|---|
+| `GET` | `/api/jobs` | Job history, newest first |
 | `POST` | `/api/jobs` | Upload a file (`file`) with `settings` (JSON) and start a job |
 | `GET` | `/api/jobs/{id}` | Job status: stage, progress, `queuePosition`, `etaSeconds`, `cancelRequested` |
 | `GET` | `/api/jobs/{id}/events` | The same status as a Server-Sent Events stream |
@@ -120,7 +122,7 @@ npm run dev
 | Variable | Default | Meaning |
 |---|---|---|
 | `FRETWISE_MAX_CONCURRENT_JOBS` | `1` | How many tracks are processed at once. Extra uploads wait in a queue and see their position. Each Demucs run can use several GB of RAM. |
-| `FRETWISE_JOB_TTL_HOURS` | `24` | Finished jobs and their files are deleted after this many hours. Job folders left over from a previous run are removed on startup. |
+| `FRETWISE_JOB_TTL_HOURS` | `24` | Finished jobs and their files are deleted after this many hours (wall-clock, counted across restarts). Raise it to keep a longer history. Finished jobs are restored on startup; jobs interrupted by a restart are reported as errors. |
 
 A finished job can also be deleted right away with `DELETE /api/jobs/{id}`.
 

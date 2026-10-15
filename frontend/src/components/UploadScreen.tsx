@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import type { TabSettings } from "../types";
 import { formatSize, formatTime } from "../lib/format";
+import RecentJobs from "./RecentJobs";
 import SettingsPanel from "./SettingsPanel";
 import { MusicFileIcon, UploadIcon, VideoFileIcon } from "./icons";
 import { Alert, Button } from "./ui";
@@ -88,9 +89,10 @@ interface Props {
   submitting: boolean;
   /** Server or restore error shown above the form. */
   error: string | null;
+  onOpenJob: (jobId: string) => void;
 }
 
-export default function UploadScreen({ file, onFileChange, settings, onSettingsChange, onSubmit, submitting, error }: Props) {
+export default function UploadScreen({ file, onFileChange, settings, onSettingsChange, onSubmit, submitting, error, onOpenJob }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
   const [rejection, setRejection] = useState<string | null>(null);
@@ -198,6 +200,8 @@ export default function UploadScreen({ file, onFileChange, settings, onSettingsC
         {!file && <span className="text-[13px] text-muted">Сначала выбери файл</span>}
         {file && !settingsValid && <span className="text-[13px] text-danger">Исправь строй в настройках</span>}
       </div>
+
+      <RecentJobs onOpen={onOpenJob} />
     </div>
   );
 }

@@ -210,15 +210,14 @@ export default function App() {
     }
   }, [status, closeStream]);
 
-  // Coming back to `?job=<id>` (reload, bookmark): pick up wherever that job is.
-  useEffect(() => {
-    const jobId = jobIdFromUrl();
-    if (!jobId) return;
-    let cancelled = false;
-    (async () => {
+  /** Pick up wherever a job is: processing, result or failure. Used for
+   * `?job=<id>` on load (reload, bookmark) and for opening a job from the
+   * history list. */
+  const restoreJob = useCallback(
+    async (jobId: string, isCancelled: () => boolean = () => false) => {
       try {
         const current = await getJobStatus(jobId);
-        if (cancelled) return;
+        if (isCancelled()) return;
         setStatus(current);
         if (current.stage === "done") {
           await loadResult(jobId);
@@ -227,7 +226,7 @@ export default function App() {
           if (current.stage !== "error" && current.stage !== "cancelled") watchJob(jobId);
         }
       } catch (e) {
-        if (cancelled) return;
+        if (isCancelled()) return;
         setJobIdInUrl(null);
         setView("upload");
         setError(
@@ -236,11 +235,33 @@ export default function App() {
             : errorMessage(e, "Не удалось восстановить задачу из ссылки"),
         );
       }
+    },
+    [loadResult, watchJob],
+  );
+
+  useEffect(() => {
+    const jobId = jobIdFromUrl();
+    if (!jobId) return;
+    let cancelled = false;
+    (async () => {
+      await restoreJob(jobId, () => cancelled);
     })();
     return () => {
       cancelled = true;
     };
-  }, [loadResult, watchJob]);
+  }, [restoreJob]);
+
+  const openJob = useCallback(
+    (jobId: string) => {
+      setError(null);
+      setConnectionError(null);
+      setFile(null);
+      setJobIdInUrl(jobId);
+      setView("restoring");
+      void restoreJob(jobId);
+    },
+    [restoreJob],
+  );
 
   useEffect(() => () => esRef.current?.close(), []);
 
@@ -280,6 +301,7 @@ export default function App() {
             onSubmit={startJob}
             submitting={submitting}
             error={error}
+            onOpenJob={openJob}
           />
         )}
 

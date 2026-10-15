@@ -30,3 +30,14 @@ export function formatEta(seconds: number | null | undefined): string | null {
   const minutes = Math.round(seconds / 60);
   return `≈ ${minutes} ${plural(minutes, ["минута", "минуты", "минут"])}`;
 }
+
+/** "сегодня, 14:32" / "вчера, 09:10" / "3 окт., 18:05" */
+export function formatWhen(unixSeconds: number, now = new Date()): string {
+  const date = new Date(unixSeconds * 1000);
+  const time = date.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const day = 24 * 3600 * 1000;
+  if (date.getTime() >= startOfToday) return `сегодня, ${time}`;
+  if (date.getTime() >= startOfToday - day) return `вчера, ${time}`;
+  return `${date.toLocaleDateString("ru-RU", { day: "numeric", month: "short" })}, ${time}`;
+}

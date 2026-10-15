@@ -56,7 +56,14 @@ const result: JobResult = {
 type Route = (url: string, init?: RequestInit) => Response | Promise<Response>;
 
 function mockFetch(route: Route) {
-  const fn = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => route(String(input), init));
+  const fn = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    // The upload screen's history list; tests that care override it in `route`.
+    if (String(input) === "/api/jobs" && (!init?.method || init.method === "GET")) {
+      const routed = await route(String(input), init);
+      return routed.headers.get("x-history") ? routed : json([]);
+    }
+    return route(String(input), init);
+  });
   vi.stubGlobal("fetch", fn);
   return fn;
 }
@@ -120,7 +127,8 @@ describe("restoring a job from ?job=", () => {
     const fetchMock = mockFetch(() => json({}));
     render(<App />);
     expect(screen.getByText("Построить табы")).toBeInTheDocument();
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.map((c) => String(c[0]))).not.toContain("/api/jobs/../../etc");
+    expect(fetchMock.mock.calls.every((c) => String(c[0]) === "/api/jobs")).toBe(true);
   });
 });
 
@@ -407,5 +415,54 @@ describe("editing the tab", () => {
     await waitFor(() => expect(screen.queryByText("изменено")).not.toBeInTheDocument());
     fireEvent.click(document.querySelector('[data-note="0:0"]')!);
     expect(fretInput().value).toBe("3");
+  });
+});
+
+
+describe("history", () => {
+  const history = [
+    { id: JOB_ID, title: "Группа крови", stage: "done", createdAt: Date.now() / 1000 - 60, durationSeconds: 286, edited: true },
+    { id: "f".repeat(32), title: "Сломанный файл", stage: "error", createdAt: Date.now() / 1000 - 90000, edited: false, error: "Не удалось извлечь звук" },
+  ];
+  const historyResponse = () => new Response(JSON.stringify(history), { status: 200, headers: { "x-history": "1" } });
+
+  it("lists previous jobs with status and opens one in a click", async () => {
+    mockFetch((url) => {
+      if (url === "/api/jobs") return historyResponse();
+      if (url.endsWith("/result")) return json(result);
+      return json(status("done", { progress: 1 }));
+    });
+    render(<App />);
+    const recent = await screen.findByRole("region", { name: "Недавние" });
+    expect(recent).toHaveTextContent("Группа крови");
+    expect(recent).toHaveTextContent("готово");
+    expect(recent).toHaveTextContent("изменено");
+    expect(recent).toHaveTextContent("ошибка");
+    expect(recent).toHaveTextContent(/сегодня, \d\d:\d\d · 4:46/);
+    expect(recent).toHaveTextContent(/вчера/);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Группа крови/ }));
+    expect(await screen.findByRole("heading", { name: "Группа крови" })).toBeInTheDocument();
+    expect(window.location.search).toBe(`?job=${JOB_ID}`);
+  });
+
+  it("deletes a job after confirming", async () => {
+    const fetchMock = mockFetch((url, init) => {
+      if (url === "/api/jobs") return historyResponse();
+      if (init?.method === "DELETE") return new Response(null, { status: 204 });
+      return json({});
+    });
+    render(<App />);
+    await screen.findByRole("region", { name: "Недавние" });
+    fireEvent.click(screen.getByRole("button", { name: "Удалить «Сломанный файл»" }));
+    fireEvent.click(screen.getByRole("button", { name: "Удалить" }));
+    await waitFor(() => expect(screen.queryByText("Сломанный файл")).not.toBeInTheDocument());
+    expect(fetchMock).toHaveBeenCalledWith(`/api/jobs/${"f".repeat(32)}`, expect.objectContaining({ method: "DELETE" }));
+  });
+
+  it("explains the empty history", async () => {
+    mockFetch(() => json({}));
+    render(<App />);
+    expect(await screen.findByText(/Здесь появятся разобранные треки/)).toBeInTheDocument();
   });
 });
