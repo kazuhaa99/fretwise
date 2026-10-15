@@ -295,8 +295,10 @@ def test_fast_even_restrikes_get_marked_tremolo():
     # deliberate tremolo, not a chopped-up sustain (that's irregular, and
     # would have been merged away before this point) or a slow restrike
     # (that's just plain repeated numbers, with no marking at all).
+    # 0.07 s apart (~14 strikes per second). 0.12 s used to count too, but that
+    # is plain sixteenths at 125 BPM and produced "tr" all over real tracks.
     base = note_name_to_midi("A2") + 5
-    notes = [Note(base, onset=t, duration=0.10, confidence=0.9) for t in (0.0, 0.12, 0.24, 0.36, 0.48)]
+    notes = [Note(base, onset=t, duration=0.05, confidence=0.9) for t in (0.0, 0.07, 0.14, 0.21, 0.28)]
 
     tab = build_tab(notes, STANDARD, max_fret_span=4, position_jump_weight=1.0)
     techniques = [n.technique for event in tab for n in event.notes]
@@ -381,3 +383,49 @@ def test_notes_inside_the_hand_reach_are_not_position_jumps():
     tab = build_tab(notes, STANDARD, style=FingeringStyle(open_strings="avoid"))
     frets = [n.fret for e in tab for n in e.notes]
     assert max(frets) - min(frets) <= 4
+
+
+def _wave_to_earth_intro():
+    """A-major run from a real-track report ("love", wave to earth): D 7-9,
+    G 6-7-9, B 7-9-10 and back down — single notes, played in 7th position."""
+    d, g, b = STANDARD.open_pitch(2), STANDARD.open_pitch(3), STANDARD.open_pitch(4)
+    line = [d + 7, d + 9, g + 6, g + 7, g + 9, b + 7, b + 9, b + 10, b + 9, b + 7, g + 9, g + 7, g + 6, d + 9, d + 7]
+    return [Note(p, onset=i * 0.25, duration=0.22) for i, p in enumerate(line)]
+
+
+def test_refinger_to_7th_position_reproduces_the_real_fingering():
+    moved = refinger(build_tab(_wave_to_earth_intro(), STANDARD), STANDARD, style=FingeringStyle(target_position=7))
+    assert _shape(moved) == [
+        (2, 7), (2, 9), (3, 6), (3, 7), (3, 9), (4, 7), (4, 9), (4, 10),
+        (4, 9), (4, 7), (3, 9), (3, 7), (3, 6), (2, 9), (2, 7),
+    ]
+
+
+@pytest.mark.parametrize("style", [FingeringStyle(), FingeringStyle(open_strings="avoid")])
+def test_a_scale_run_stays_in_one_hand_position(style):
+    # The hand is search state, so it can't creep up a single string one
+    # "small" step at a time: the whole run fits in one box (± a stretch).
+    tab = build_tab(_wave_to_earth_intro(), STANDARD, style=style)
+    fretted = [n.fret for e in tab for n in e.notes if n.fret > 0]
+    assert max(fretted) - min(fretted) <= 4
+
+
+def test_open_strings_are_not_mixed_into_a_run_high_up_the_neck():
+    # Hand at the 7th fret: B3 and E4 are fretted in position (D9, G9), not
+    # taken as open strings in the middle of the run.
+    moved = refinger(build_tab(_wave_to_earth_intro(), STANDARD), STANDARD, style=FingeringStyle(target_position=7))
+    assert all(n.fret > 0 for e in moved for n in e.notes)
+
+
+def test_strummed_sixteenths_are_not_tremolo():
+    # Re-struck notes at sixteenths around 100 BPM (0.15 s apart) are ordinary
+    # picking; tremolo is much faster.
+    notes = [Note(STANDARD.open_pitch(3) + 2, onset=i * 0.15, duration=0.1) for i in range(8)]
+    tab = build_tab(notes, STANDARD)
+    assert all(n.technique != "tremolo" for e in tab for n in e.notes)
+
+
+def test_fast_even_restrikes_are_tremolo():
+    notes = [Note(STANDARD.open_pitch(3) + 2, onset=i * 0.06, duration=0.04) for i in range(10)]
+    tab = build_tab(notes, STANDARD)
+    assert all(n.technique == "tremolo" for e in tab for n in e.notes)

@@ -277,38 +277,18 @@ def _nearest_reachable_pitch(fretboard: Fretboard, pitch: int) -> int | None:
     return None
 
 
-def _voicing_position(voicing: Voicing) -> float | None:
-    """A representative fret for the fretting-hand position this voicing
-    implies, or None for open strings only — those don't need the hand
-    anywhere in particular."""
-    fretted = [f for _, f in voicing if f > 0]
-    return (sum(fretted) / len(fretted)) if fretted else None
-
-
-# The fretting hand covers about this many frets either side of its centre
-# without moving (one finger per fret over a four-fret box). Notes inside that
-# reach — 5th and 7th fret of the same chord shape — are not a "jump".
-_HAND_REACH = 2.0
-
-
-def _jump(a: float | None, b: float | None) -> float:
-    """How far the hand has to shift between two positions (frets)."""
-    if a is None or b is None:
-        return 0.0
-    return max(0.0, abs(a - b) - _HAND_REACH)
-
-
 @dataclass(frozen=True)
 class FingeringStyle:
     """How to choose among playable voicings of the same notes.
 
     The same pitches can usually be fingered in several places — an A chord
     as x-0-2-2-2-0 in open position or 5-x-7-6-5-x up the neck with the thumb
-    over the top, Hendrix-style — and the audio alone barely tells them apart.
-    The default leans towards open strings (the most common way to play most
-    things); `open_strings="avoid"` leans towards playing in position, and
-    `target_position` (used when the user re-fingers a passage) pulls every
-    note towards a chosen fret.
+    over the top, Hendrix-style; an A-major run in 2nd or in 7th position —
+    and the audio alone barely tells them apart (the difference is timbre,
+    not pitch). The default leans towards open strings near the nut;
+    `open_strings="avoid"` leans towards playing in position, and
+    `target_position` (used when the user re-fingers a passage) puts the hand
+    at a chosen fret.
     """
 
     open_strings: str = "auto"  # "auto" | "avoid"
@@ -317,32 +297,71 @@ class FingeringStyle:
 
 DEFAULT_STYLE = FingeringStyle()
 
-_OPEN_BONUS = 0.9  # "auto": an open string is easier than a fretted note
+# --- The hand model ----------------------------------------------------------
+#
+# The fretting hand sits at an *anchor* fret: the index finger's fret, with the
+# other fingers covering the next three ("one finger per fret"). Notes inside
+# that box cost nothing extra; a fret just outside it is a stretch; anything
+# else needs the hand to move, which is what the search economises on. The
+# anchor is explicit search state, so the hand can't drift up the neck one
+# "small" step at a time — a run that walks up a single string pays for every
+# shift, exactly like a guitarist's hand does.
+_BOX = 3  # frets above the anchor reachable without stretching
+# Per fret beyond the box (one fret each side allowed). Reaching back with
+# the index finger is the everyday position-playing stretch; reaching up with
+# the pinky is harder.
+_STRETCH_DOWN_COST = 0.5
+_STRETCH_UP_COST = 0.8
+_SHIFT_BASE = 1.0  # any move of the hand…
+_SHIFT_PER_FRET = 0.5  # …plus this per fret moved; both × position_jump_weight
+_NEAR_NUT = 4  # anchors up to here count as "open position"
+
+_OPEN_BONUS = 0.9  # "auto", hand near the nut: an open string is easier than a fretted note
+_OPEN_UP_THE_NECK = 1.2  # "auto", hand higher: an open string in a position run is unidiomatic
 _OPEN_PENALTY = 4.0  # "avoid": open strings only when nothing fretted fits
-_TARGET_WEIGHT = 3.0  # per fret outside the chosen position's reach
-_LOW_FRET_WEIGHT = 0.25
-_LOW_FRET_WEIGHT_IN_POSITION = 0.05
+_TARGET_WEIGHT = 3.0  # per fret the anchor is away from the requested position
+_LOW_FRET_WEIGHT = 0.25  # "auto": positions nearer the nut are a little easier
+_LOW_FRET_WEIGHT_IN_POSITION = 0.02  # "avoid"/target: the position barely matters
 
 
-def _voicing_ease_cost(voicing: Voicing, style: FingeringStyle = DEFAULT_STYLE, max_span: int = 4) -> float:
-    """Lower is easier: tight, low-fret shapes; open strings per `style`."""
+def _anchors_for(voicing: Voicing, max_anchor: int) -> list[int]:
+    """Hand anchors from which every fretted note is reachable (box ± 1 fret)."""
     fretted = [f for _, f in voicing if f > 0]
-    open_count = sum(1 for _, f in voicing if f == 0)
-    span = (max(fretted) - min(fretted)) if fretted else 0
-    avg_fret = (sum(fretted) / len(fretted)) if fretted else 0.0
-    avoid_open = style.open_strings == "avoid" or style.target_position is not None
-    # Low frets are "easier" only for open-position playing; someone playing
-    # in position doesn't care whether it's the 2nd or the 7th fret, and the
-    # pull towards the nut would drag a held shape apart note by note.
-    cost = span * 1.4 + avg_fret * (_LOW_FRET_WEIGHT_IN_POSITION if avoid_open else _LOW_FRET_WEIGHT)
-    # Asking for a position implies leaving open strings out of it too.
-    cost += open_count * (_OPEN_PENALTY if avoid_open else -_OPEN_BONUS)
+    if not fretted:
+        return list(range(1, max_anchor + 1))
+    low = max(1, max(fretted) - _BOX - 1)
+    high = min(max_anchor, min(fretted) + 1)
+    return list(range(low, high + 1))
+
+
+def _voicing_cost(voicing: Voicing, anchor: int, style: FingeringStyle) -> float:
+    """Cost of playing `voicing` with the hand at `anchor` (lower is easier)."""
+    fretted = [f for _, f in voicing if f > 0]
+    open_count = len(voicing) - len(fretted)
+    in_position = style.open_strings == "avoid" or style.target_position is not None
+    cost = 0.0
+    if fretted:
+        cost += (max(fretted) - min(fretted)) * 1.4
+        cost += sum(max(0, anchor - f) for f in fretted) * _STRETCH_DOWN_COST
+        cost += sum(max(0, f - (anchor + _BOX)) for f in fretted) * _STRETCH_UP_COST
+        cost += anchor * (_LOW_FRET_WEIGHT_IN_POSITION if in_position else _LOW_FRET_WEIGHT)
+    if open_count:
+        if in_position:
+            cost += open_count * _OPEN_PENALTY
+        elif anchor <= _NEAR_NUT:
+            cost -= open_count * _OPEN_BONUS
+        else:
+            cost += open_count * _OPEN_UP_THE_NECK
     if style.target_position is not None:
-        low = style.target_position
-        high = style.target_position + max_span
-        for f in fretted:
-            cost += _TARGET_WEIGHT * max(0, low - f, f - high)
+        cost += abs(anchor - style.target_position) * _TARGET_WEIGHT
     return cost
+
+
+def _static_cost(voicing: Voicing, style: FingeringStyle) -> float:
+    """Anchor-independent estimate, only for pruning huge candidate lists."""
+    fretted = [f for _, f in voicing if f > 0]
+    centre = min(fretted) if fretted else 1
+    return _voicing_cost(voicing, max(1, centre), style)
 
 
 def _prune(
@@ -353,30 +372,17 @@ def _prune(
 ) -> list[Voicing]:
     if len(voicings) <= limit:
         return voicings
-    # Pruned by the same cost the search uses — otherwise the voicing a style
-    # asks for (say, everything at the 5th fret) could be dropped before the
-    # search ever sees it.
-    return sorted(voicings, key=lambda v: _voicing_ease_cost(v, style, max_span))[:limit]
+    # Pruned by (an estimate of) the cost the search uses — otherwise the
+    # voicing a style asks for (say, everything at the 5th fret) could be
+    # dropped before the search ever sees it.
+    return sorted(voicings, key=lambda v: _static_cost(v, style))[:limit]
 
 
-# Shape coherence between a note and the one still ringing before it: an
-# arpeggiated chord is held as one shape, so both must sit under one hand.
-_SHAPE_SPREAD_WEIGHT = 0.5  # per fret of spread across the two voicings
-_SHAPE_OUT_OF_REACH = 3.0  # the two can't be held at once within max_span
-_SHAPE_STRING_CUT = 0.4  # re-using the ringing string cuts the earlier note short
-
-
-def _shape_cost(previous: Voicing, current: Voicing, max_span: int) -> float:
-    fretted = [f for _, f in previous if f > 0] + [f for _, f in current if f > 0]
-    cost = 0.0
-    if fretted:
-        spread = max(fretted) - min(fretted)
-        cost += spread * _SHAPE_SPREAD_WEIGHT
-        if spread > max_span:
-            cost += _SHAPE_OUT_OF_REACH
-    if {s for s, _ in previous} & {s for s, _ in current}:
-        cost += _SHAPE_STRING_CUT
-    return cost
+def _shift_costs(anchors: int, weight: float) -> list[list[float]]:
+    return [
+        [0.0 if a == b else weight * (_SHIFT_BASE + abs(a - b) * _SHIFT_PER_FRET) for b in range(anchors + 1)]
+        for a in range(anchors + 1)
+    ]
 
 
 def _best_voicing_sequence(
@@ -384,52 +390,67 @@ def _best_voicing_sequence(
     position_jump_weight: float,
     style: FingeringStyle = DEFAULT_STYLE,
     max_span: int = 4,
-    ringing: list[bool] | None = None,
+    max_anchor: int = 19,
 ) -> list[Voicing]:
-    """Viterbi search: minimize sum of (ease cost + weighted hand-position jumps).
+    """Viterbi search over (voicing, hand anchor) states.
 
-    `ringing[i]` says event i-1 is still sounding when event i starts (an
-    arpeggio over a held chord, notes let ring): then the pair is also scored
-    as one hand shape (`_shape_cost`). Without that, each note of a held
-    chord was fingered on its own, scattering one shape across positions.
+    Minimises the sum of voicing costs (`_voicing_cost`, which depends on
+    where the hand is) and hand shifts. Because the transition cost depends
+    only on the anchors, the best predecessor for every anchor is computed
+    once per event — O(events × (voicings × anchors + anchors²)).
     """
     n = len(candidates)
     if n == 0:
         return []
-
     inf = float("inf")
-    positions = [[_voicing_position(v) for v in step] for step in candidates]
-    ease = [[_voicing_ease_cost(v, style, max_span) for v in step] for step in candidates]
+    max_anchor = max(1, max_anchor)
+    shift = _shift_costs(max_anchor, position_jump_weight)
 
-    dp: list[list[float]] = [[inf] * len(candidates[i]) for i in range(n)]
-    backptr: list[list[int]] = [[-1] * len(candidates[i]) for i in range(n)]
+    # dp[i][k] maps anchor -> cost; best_prev[i][a] = (cost, k) over voicings of event i
+    dp: list[list[dict[int, float]]] = []
+    from_anchor: list[list[int]] = []  # for event i, anchor a: the anchor at event i-1
+    best_by_anchor: list[list[tuple[float, int]]] = []
 
-    for k in range(len(candidates[0])):
-        dp[0][k] = ease[0][k]
+    for i, step in enumerate(candidates):
+        if i == 0:
+            arrive = [0.0] * (max_anchor + 1)
+            arrive_from = list(range(max_anchor + 1))
+        else:
+            prev = best_by_anchor[i - 1]
+            arrive = [inf] * (max_anchor + 1)
+            arrive_from = [0] * (max_anchor + 1)
+            for a in range(1, max_anchor + 1):
+                for b in range(1, max_anchor + 1):
+                    cost = prev[b][0] + shift[b][a]
+                    if cost < arrive[a]:
+                        arrive[a], arrive_from[a] = cost, b
+        from_anchor.append(arrive_from)
 
-    for i in range(1, n):
-        for k in range(len(candidates[i])):
-            best_cost, best_prev = inf, -1
-            for j in range(len(candidates[i - 1])):
-                if dp[i - 1][j] == inf:
-                    continue
-                jump = _jump(positions[i][k], positions[i - 1][j]) * position_jump_weight
-                cost = dp[i - 1][j] + jump + ease[i][k]
-                if ringing and ringing[i]:
-                    cost += _shape_cost(candidates[i - 1][j], candidates[i][k], max_span)
-                if cost < best_cost:
-                    best_cost, best_prev = cost, j
-            dp[i][k] = best_cost
-            backptr[i][k] = best_prev
+        layer: list[dict[int, float]] = []
+        best = [(inf, -1)] * (max_anchor + 1)
+        for k, voicing in enumerate(step):
+            costs: dict[int, float] = {}
+            for a in _anchors_for(voicing, max_anchor):
+                total = arrive[a] + _voicing_cost(voicing, a, style)
+                costs[a] = total
+                if total < best[a][0]:
+                    best[a] = (total, k)
+            layer.append(costs)
+        dp.append(layer)
+        best_by_anchor.append(best)
 
-    last_step = dp[n - 1]
-    end_idx = min(range(len(last_step)), key=lambda k: last_step[k])
-    path = [end_idx]
-    for i in range(n - 1, 0, -1):
-        path.append(backptr[i][path[-1]])
+    # Backtrack from the cheapest final state.
+    last = best_by_anchor[-1]
+    anchor = min(range(1, max_anchor + 1), key=lambda a: last[a][0])
+    path: list[int] = []
+    for i in range(n - 1, -1, -1):
+        k = best_by_anchor[i][anchor][1]
+        if k < 0:  # unreachable anchor (shouldn't happen): fall back to the cheapest voicing
+            k = min(range(len(candidates[i])), key=lambda j: min(dp[i][j].values(), default=inf))
+        path.append(k)
+        anchor = from_anchor[i][anchor]
     path.reverse()
-
-    return [candidates[i][path[i]] for i in range(n)]
+    return [candidates[i][k] for i, k in enumerate(path)]
 
 
 _LEGATO_GAP = 0.09  # seconds between notes still considered a connected phrase
@@ -445,8 +466,11 @@ _SLIDE_FRET_DELTA = 4  # same-string jumps at least this big read as a slide, no
 # tremolo picking lands at a fast, mechanically even rate; deliberate slower
 # restrikes are just... restrikes, written as plain repeated numbers.
 _TREMOLO_RUN_GAP_MAX = 0.15  # mirrors `_RUN_GAP_MAX` — same "still one cluster" window
-_TREMOLO_MIN_REPEATS = 3  # need an actual run, not a one-off restrike, to call it tremolo
-_TREMOLO_MAX_MEAN_IOI = 0.16  # roughly a sixteenth note at ~95 BPM or faster
+_TREMOLO_MIN_REPEATS = 4  # need an actual run, not a couple of restrikes, to call it tremolo
+# Tremolo is faster than any written subdivision a song is strummed in: ~11+
+# strikes per second. (It used to be 0.16 s — sixteenths at ~95 BPM — which
+# labelled ordinary strummed sixteenths "tr" all over real tracks.)
+_TREMOLO_MAX_MEAN_IOI = 0.09
 _TREMOLO_IOI_CV_MAX = 0.30  # how evenly spaced the strikes must be to read as mechanical
 
 
@@ -685,7 +709,7 @@ def build_tab(
         position_jump_weight,
         style,
         max_fret_span,
-        ringing=_ringing([(time, duration) for time, duration, _, _ in prepared]),
+        max_anchor=max(1, fretboard.frets_above_capo - _BOX),
     )
 
     tab_events: list[TabEvent] = []
@@ -704,19 +728,6 @@ def build_tab(
 
     _annotate_techniques(tab_events)
     return tab_events
-
-
-# How far into the next note the previous one must still sound to count as
-# held together (shorter overlaps are release jitter, not a held shape).
-_RING_OVERLAP = 0.05
-
-
-def _ringing(spans: list[tuple[float, float]]) -> list[bool]:
-    """For each event, whether the previous one is still ringing at its onset."""
-    return [False] + [
-        prev_time + prev_duration - time > _RING_OVERLAP
-        for (prev_time, prev_duration), (time, _) in zip(spans, spans[1:])
-    ]
 
 
 # When re-fingering the user's own notes, a wider stretch is allowed before
@@ -753,7 +764,7 @@ def refinger(
         candidates.append(_prune(voicings, style=style, max_span=max_fret_span))
 
     chosen = _best_voicing_sequence(
-        candidates, position_jump_weight, style, max_fret_span, ringing=_ringing([(e.time, e.duration) for e in events])
+        candidates, position_jump_weight, style, max_fret_span, max_anchor=max(1, fretboard.frets_above_capo - _BOX)
     )
 
     out: list[TabEvent] = []
