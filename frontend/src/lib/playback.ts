@@ -51,21 +51,31 @@ export interface Clicker {
 class WebAudioClicker implements Clicker {
   private ctx: AudioContext | null = null;
 
-  private context(): AudioContext {
-    if (!this.ctx) this.ctx = new AudioContext();
+  /** The audio context, or null where Web Audio is unavailable (very old
+   * browsers, locked-down embeds) — the metronome then stays silent instead
+   * of breaking playback. Older Safari only has the prefixed constructor. */
+  private context(): AudioContext | null {
+    if (!this.ctx) {
+      const Ctor =
+        (globalThis as { AudioContext?: typeof AudioContext }).AudioContext ??
+        (globalThis as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!Ctor) return null;
+      this.ctx = new Ctor();
+    }
     return this.ctx;
   }
 
   now(): number {
-    return this.context().currentTime;
+    return this.context()?.currentTime ?? 0;
   }
 
   resume(): Promise<void> {
-    return this.context().resume();
+    return this.context()?.resume() ?? Promise.resolve();
   }
 
   click(at: number, accent: boolean): void {
     const ctx = this.context();
+    if (!ctx) return;
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.frequency.value = accent ? 1760 : 1320;
@@ -98,7 +108,7 @@ export type MediaLike = Pick<
   | "addEventListener"
   | "removeEventListener"
   | "getAttribute"
-> & { preservesPitch?: boolean; preload?: string };
+> & { preservesPitch?: boolean; preload?: string; readyState?: number };
 
 const LOOKAHEAD_SECONDS = 0.12;
 
@@ -113,6 +123,8 @@ export class PlaybackEngine {
   private frame: number | null = null;
   private countInTimer: ReturnType<typeof setTimeout> | null = null;
   private resumeAfterLoad: { at: number; play: boolean } | null = null;
+  /** A seek requested before the file's metadata loaded (see `seek`). */
+  private pendingSeek: number | null = null;
   private connected = false;
 
   private beats: number[] = [];
@@ -183,7 +195,8 @@ export class PlaybackEngine {
 
   get state(): PlaybackState {
     const duration = Number.isFinite(this.media.duration) ? this.media.duration : 0;
-    return { time: this.media.currentTime, duration, playing: !this.media.paused, counting: this.counting };
+    const time = this.pendingSeek ?? this.media.currentTime;
+    return { time, duration, playing: !this.media.paused, counting: this.counting };
   }
 
   subscribe(listener: PlaybackListener): () => void {
@@ -233,7 +246,15 @@ export class PlaybackEngine {
   seek(seconds: number): void {
     const duration = Number.isFinite(this.media.duration) ? this.media.duration : Infinity;
     const t = Math.max(0, Math.min(seconds, duration));
-    this.media.currentTime = t;
+    // Before metadata has loaded the browser drops (or later resets) a
+    // currentTime write, so a click on a bar right after the page opens
+    // would silently do nothing. Remember it and apply it on load.
+    if (this.media.readyState === 0) {
+      this.pendingSeek = t;
+      if (this.resumeAfterLoad) this.resumeAfterLoad.at = t;
+    } else {
+      this.media.currentTime = t;
+    }
     this.resetMetronome(t);
     this.emit();
   }
@@ -402,6 +423,11 @@ export class PlaybackEngine {
     this.media.volume = this.volume;
     const resume = this.resumeAfterLoad;
     this.resumeAfterLoad = null;
+    if (this.pendingSeek !== null && !resume) {
+      this.media.currentTime = this.pendingSeek;
+      this.resetMetronome(this.pendingSeek);
+    }
+    this.pendingSeek = null;
     if (resume) {
       const duration = Number.isFinite(this.media.duration) ? this.media.duration : resume.at;
       this.media.currentTime = Math.min(resume.at, duration);

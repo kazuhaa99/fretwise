@@ -27,3 +27,12 @@ export function techniqueMark(note: TabNote): string | null {
   if (note.technique === "bend" && note.bendSemitones) return bendLabel(note.bendSemitones);
   return TECHNIQUE_MARKS[note.technique];
 }
+
+/** Label over a bend arrow, as in engraved tab: ¼, ½, full, 1½, 2. */
+export function bendArrowLabel(semitones: number): string {
+  const quarterTones = Math.max(1, Math.round(semitones * 2));
+  if (quarterTones === 4) return "full";
+  const whole = Math.floor(quarterTones / 4);
+  const fraction = QUARTER_FRACTIONS[quarterTones % 4];
+  return `${whole > 0 ? whole : ""}${fraction}` || "full";
+}

@@ -127,6 +127,10 @@ export function jobEventsUrl(jobId: string): string {
   return `${BASE}/jobs/${jobId}/events`;
 }
 
+export async function cancelJob(jobId: string): Promise<JobStatus> {
+  return request<JobStatus>(`${BASE}/jobs/${jobId}/cancel`, { method: "POST" });
+}
+
 export function gp5DownloadUrl(jobId: string): string {
   return `${BASE}/jobs/${jobId}/export.gp5`;
 }

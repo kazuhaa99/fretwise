@@ -1,18 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import UploadDropzone from "./components/UploadDropzone";
-import SettingsPanel from "./components/SettingsPanel";
-import ProcessingTimeline from "./components/ProcessingTimeline";
-import TabViewer from "./components/TabViewer";
-import AudioPlayer, { type AudioPlayerHandle, type TimeListener } from "./components/AudioPlayer";
-import {
-  uploadJob,
-  getJobResult,
-  getJobStatus,
-  jobEventsUrl,
-  gp5DownloadUrl,
-  errorMessage,
-  isNotFound,
-} from "./api/client";
+import AppHeader from "./components/AppHeader";
+import ProcessingScreen from "./components/ProcessingScreen";
+import ResultScreen from "./components/ResultScreen";
+import UploadScreen from "./components/UploadScreen";
+import { Button } from "./components/ui";
+import { cancelJob, errorMessage, getJobResult, getJobStatus, isNotFound, jobEventsUrl, uploadJob } from "./api/client";
+import { useTheme } from "./theme";
 import { DEFAULT_SETTINGS, type JobResult, type JobStatus, type TabSettings } from "./types";
 
 type View = "upload" | "restoring" | "processing" | "result";
@@ -25,6 +18,7 @@ type View = "upload" | "restoring" | "processing" | "result";
  * should step through.
  */
 const JOB_PARAM = "job";
+const SETTINGS_KEY = "fretwise-settings";
 
 function jobIdFromUrl(): string | null {
   const id = new URLSearchParams(window.location.search).get(JOB_PARAM);
@@ -38,21 +32,46 @@ function setJobIdInUrl(jobId: string | null): void {
   window.history.replaceState(window.history.state, "", url);
 }
 
+/** Last used settings are remembered per browser (a convenience only). */
+function loadSettings(): TabSettings {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (!raw) return DEFAULT_SETTINGS;
+    const parsed = JSON.parse(raw) as Partial<TabSettings>;
+    if (!Array.isArray(parsed.tuning)) return DEFAULT_SETTINGS;
+    return { ...DEFAULT_SETTINGS, ...parsed };
+  } catch {
+    return DEFAULT_SETTINGS;
+  }
+}
+
+function saveSettings(settings: TabSettings): void {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  } catch {
+    // Storage unavailable: settings just won't be remembered.
+  }
+}
+
 const JOB_GONE_MESSAGE =
   "Задача не найдена на сервере — возможно, он был перезапущен или задача удалена. Загрузи файл ещё раз.";
 
 export default function App() {
+  const [theme, setTheme] = useTheme();
   const [view, setView] = useState<View>(() => (jobIdFromUrl() ? "restoring" : "upload"));
   const [file, setFile] = useState<File | null>(null);
-  const [settings, setSettings] = useState<TabSettings>(DEFAULT_SETTINGS);
+  const [settings, setSettings] = useState<TabSettings>(loadSettings);
   const [status, setStatus] = useState<JobStatus | null>(null);
   const [result, setResult] = useState<JobResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [cancelPending, setCancelPending] = useState(false);
   // Lost contact with the job (backend down, job gone) — distinct from the
   // pipeline itself failing, which arrives as a normal `stage: "error"` status.
   const [connectionError, setConnectionError] = useState<string | null>(null);
-  const playerRef = useRef<AudioPlayerHandle>(null);
   const esRef = useRef<EventSource | null>(null);
+
+  useEffect(() => saveSettings(settings), [settings]);
 
   const closeStream = useCallback(() => {
     esRef.current?.close();
@@ -67,6 +86,7 @@ export default function App() {
     setResult(null);
     setError(null);
     setConnectionError(null);
+    setCancelPending(false);
     setJobIdInUrl(null);
   }, [closeStream]);
 
@@ -88,11 +108,10 @@ export default function App() {
    *
    * EventSource reconnects on its own after a dropped connection and only
    * tells us via `onerror` — with no status code, so it can't distinguish a
-   * proxy hiccup from a dead backend or a job that no longer exists. Without
-   * handling it, a crashed backend left the UI on "processing" forever. On
-   * every error we ask the plain status endpoint what is going on: a healthy
-   * answer means "let the browser reconnect" (or the job finished while we
-   * were away), anything else stops the stream and tells the user.
+   * proxy hiccup from a dead backend or a job that no longer exists. On every
+   * error we ask the plain status endpoint what is going on: a healthy answer
+   * means "let the browser reconnect" (or the job finished while we were
+   * away), anything else stops the stream and tells the user.
    */
   const watchJob = useCallback(
     (jobId: string) => {
@@ -106,8 +125,9 @@ export default function App() {
         if (data.stage === "done") {
           closeStream();
           void loadResult(jobId);
-        } else if (data.stage === "error") {
+        } else if (data.stage === "error" || data.stage === "cancelled") {
           closeStream();
+          setCancelPending(false);
         }
       };
 
@@ -135,6 +155,8 @@ export default function App() {
     if (!file) return;
     setError(null);
     setConnectionError(null);
+    setCancelPending(false);
+    setSubmitting(true);
     try {
       const job = await uploadJob(file, settings);
       setStatus(job);
@@ -147,6 +169,8 @@ export default function App() {
       // error next to, so it goes into the processing view's error box.
       if (view === "processing") setConnectionError(message);
       else setError(message);
+    } finally {
+      setSubmitting(false);
     }
   }, [file, settings, watchJob, view]);
 
@@ -154,7 +178,7 @@ export default function App() {
    * has it, otherwise upload the same file again with the same settings. */
   const retry = useCallback(async () => {
     if (!status) return;
-    if (status.stage !== "error") {
+    if (status.stage !== "error" && status.stage !== "cancelled") {
       try {
         await getJobStatus(status.id);
         watchJob(status.id);
@@ -166,12 +190,25 @@ export default function App() {
         }
       }
     }
-    if (file) {
-      await startJob();
-    } else {
-      reset();
-    }
+    if (file) await startJob();
+    else reset();
   }, [status, file, watchJob, startJob, reset]);
+
+  const cancel = useCallback(async () => {
+    if (!status) return;
+    setCancelPending(true);
+    try {
+      const next = await cancelJob(status.id);
+      setStatus(next);
+      if (next.stage === "cancelled") {
+        closeStream();
+        setCancelPending(false);
+      }
+    } catch (e) {
+      setCancelPending(false);
+      setConnectionError(errorMessage(e, "Не удалось отменить обработку"));
+    }
+  }, [status, closeStream]);
 
   // Coming back to `?job=<id>` (reload, bookmark): pick up wherever that job is.
   useEffect(() => {
@@ -187,7 +224,7 @@ export default function App() {
           await loadResult(jobId);
         } else {
           setView("processing");
-          if (current.stage !== "error") watchJob(jobId);
+          if (current.stage !== "error" && current.stage !== "cancelled") watchJob(jobId);
         }
       } catch (e) {
         if (cancelled) return;
@@ -207,175 +244,74 @@ export default function App() {
 
   useEffect(() => () => esRef.current?.close(), []);
 
-  const subscribeToPlayback = useCallback(
-    (listener: TimeListener) => playerRef.current?.subscribe(listener) ?? (() => {}),
-    [],
-  );
-
-  const failed = status?.stage === "error" || connectionError !== null;
+  const headerActions =
+    view === "processing" || view === "result" ? (
+      <span className="hidden sm:block">
+        <Button variant="ghost" onClick={reset}>
+          Новый файл
+        </Button>
+      </span>
+    ) : null;
 
   return (
     <div className="min-h-screen">
-      <header className="border-b border-walnut-800">
-        <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-5">
-          <button onClick={reset} className="flex items-center gap-3">
-            <Logo />
-            <span className="text-lg font-semibold tracking-tight text-cream">Fretwise</span>
-          </button>
-          {view !== "upload" && (
-            <button onClick={reset} className="text-sm text-muted transition-colors hover:text-brass">
-              Разобрать другой трек
-            </button>
-          )}
-        </div>
-      </header>
+      <a
+        href="#main"
+        className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 focus:rounded-md focus:bg-raised focus:px-4 focus:py-2 focus:shadow-float"
+      >
+        К содержимому
+      </a>
+      <AppHeader theme={theme} onThemeChange={setTheme} onHome={view === "upload" ? undefined : reset} actions={headerActions} />
 
-      <main className="mx-auto max-w-5xl px-6 py-12">
+      <main
+        id="main"
+        className="mx-auto max-w-6xl px-4 pt-8 pb-16 sm:px-6 sm:pt-10"
+        style={{
+          paddingLeft: "max(16px, env(safe-area-inset-left, 0px))",
+          paddingRight: "max(16px, env(safe-area-inset-right, 0px))",
+        }}
+      >
         {view === "upload" && (
-          <div className="space-y-8">
-            <div className="text-center">
-              <h1 className="text-3xl font-semibold tracking-tight text-cream sm:text-4xl">
-                Превратим запись в табулатуру для гитары
-              </h1>
-              <p className="mx-auto mt-3 max-w-xl text-muted">
-                Загрузи трек или видео — модель выделит партию гитары, распознает ноты по высоте звука
-                и соберёт табы, которые реально сыграть руками.
-              </p>
-            </div>
-
-            <UploadDropzone onFileSelected={setFile} />
-
-            {file && (
-              <div className="flex items-center gap-3 rounded-xl border border-walnut-700 bg-walnut-900/60 px-4 py-3">
-                <FileIcon />
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium text-cream">{file.name}</p>
-                  <p className="text-xs text-muted">{(file.size / (1024 * 1024)).toFixed(1)} МБ</p>
-                </div>
-                <button onClick={() => setFile(null)} className="text-sm text-muted hover:text-red-400">
-                  Убрать
-                </button>
-              </div>
-            )}
-
-            <SettingsPanel settings={settings} onChange={setSettings} />
-
-            {error && <p className="text-center text-sm text-red-400">{error}</p>}
-
-            <div className="flex justify-center">
-              <button
-                onClick={startJob}
-                disabled={!file}
-                className="rounded-full bg-brass px-8 py-3.5 text-sm font-semibold text-walnut-950 transition-all hover:bg-brass-light disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                Построить табы
-              </button>
-            </div>
-          </div>
+          <UploadScreen
+            file={file}
+            onFileChange={setFile}
+            settings={settings}
+            onSettingsChange={setSettings}
+            onSubmit={startJob}
+            submitting={submitting}
+            error={error}
+          />
         )}
 
         {view === "restoring" && (
-          <p className="text-center text-muted" role="status">
-            Загружаем задачу…
-          </p>
+          <div className="mx-auto grid max-w-3xl gap-4" role="status" aria-label="Загружаем задачу">
+            <div className="h-8 w-2/3 rounded-md bg-line" style={{ animation: "fw-pulse 1.6s ease-in-out infinite" }} />
+            <div className="h-40 rounded-lg bg-surface" />
+            <p className="text-muted">Загружаем задачу…</p>
+          </div>
         )}
 
         {view === "processing" && status && (
-          <div className="mx-auto max-w-xl space-y-6">
-            <ProcessingTimeline status={status} connectionError={connectionError} />
-            {failed && (
-              <div className="flex flex-wrap justify-center gap-3">
-                <button
-                  onClick={retry}
-                  className="rounded-full bg-brass px-6 py-3 text-sm font-semibold text-walnut-950 transition-colors hover:bg-brass-light"
-                >
-                  Попробовать снова
-                </button>
-                <button
-                  onClick={reset}
-                  className="rounded-full px-6 py-3 text-sm font-medium text-cream ring-1 ring-walnut-600 transition-colors hover:ring-brass"
-                >
-                  Загрузить другой файл
-                </button>
-              </div>
-            )}
-          </div>
+          <ProcessingScreen
+            status={status}
+            title={file?.name ?? null}
+            connectionError={connectionError}
+            cancelPending={cancelPending}
+            canReupload={file !== null}
+            onCancel={cancel}
+            onRetry={retry}
+            onReset={reset}
+          />
         )}
 
-        {view === "result" && result && (
-          <div className="space-y-6">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div>
-                <h2 className="text-2xl font-semibold text-cream">Готово — вот твоя табулатура</h2>
-                <p className="mt-1 text-sm text-muted">
-                  Можно проиграть запись, следить за курсором по партитуре или скачать файл для Guitar Pro.
-                </p>
-              </div>
-              <a
-                href={gp5DownloadUrl(result.job.id)}
-                download
-                className="flex items-center gap-2 rounded-full bg-brass px-6 py-3 text-sm font-semibold text-walnut-950 transition-colors hover:bg-brass-light"
-              >
-                <DownloadIcon />
-                Скачать .gp5
-              </a>
-            </div>
-
-            <AudioPlayer
-              key={result.job.id}
-              ref={playerRef}
-              originalUrl={result.originalAudioUrl}
-              guitarUrl={result.guitarAudioUrl}
-            />
-
-            <TabViewer
-              key={result.job.id}
-              tab={result.tab}
-              subscribe={subscribeToPlayback}
-              onSeek={(t) => playerRef.current?.seekTo(t)}
-            />
-          </div>
-        )}
+        {view === "result" && result && <ResultScreen key={result.job.id} result={result} onReset={reset} />}
       </main>
 
-      <footer className="mx-auto max-w-5xl px-6 py-10 text-center text-xs text-muted">
-        Fretwise работает локально: файлы и модели не покидают эту машину.
-      </footer>
+      {view !== "result" && (
+        <footer className="mx-auto max-w-6xl px-4 pb-10 text-center text-[13px] text-muted sm:px-6">
+          Fretwise работает локально: файлы и модели не покидают этот компьютер.
+        </footer>
+      )}
     </div>
-  );
-}
-
-function Logo() {
-  return (
-    <svg width="34" height="34" viewBox="0 0 40 40" fill="none">
-      <rect width="40" height="40" rx="10" fill="#2a221b" />
-      <path
-        d="M13 28V12m0 16c0 2.2 1.8 4 4 4s4-1.8 4-4-1.8-4-4-4M13 12l5 5M13 12l-5 5"
-        stroke="#d99a4e"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <line x1="22" y1="14" x2="34" y2="14" stroke="#c9b896" strokeWidth="1.2" />
-      <line x1="22" y1="18" x2="34" y2="18" stroke="#c9b896" strokeWidth="1.2" />
-      <line x1="22" y1="22" x2="34" y2="22" stroke="#c9b896" strokeWidth="1.2" />
-    </svg>
-  );
-}
-
-function FileIcon() {
-  return (
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" className="shrink-0 text-brass">
-      <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M14 2v6h6" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function DownloadIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <path d="M12 3v12m0 0l-4-4m4 4l4-4M4 19h16" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
   );
 }

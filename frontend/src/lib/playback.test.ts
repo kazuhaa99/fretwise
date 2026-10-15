@@ -170,6 +170,19 @@ describe("PlaybackEngine", () => {
     expect(media.currentTime).toBe(1.98);
   });
 
+  it("remembers a seek made before the audio's metadata loaded", () => {
+    const { media, engine } = setup();
+    (media as unknown as { readyState: number }).readyState = 0;
+    const seen: number[] = [];
+    engine.subscribe((s) => seen.push(s.time));
+    engine.seek(12);
+    expect(seen.at(-1)).toBe(12); // the UI already shows the new position
+    expect(media.currentTime).toBe(0);
+    (media as unknown as { readyState: number }).readyState = 1;
+    media.dispatchEvent(new Event("loadedmetadata"));
+    expect(media.currentTime).toBe(12);
+  });
+
   it("disconnect stops playback and listeners", async () => {
     const { media, engine } = setup();
     const listener = vi.fn();

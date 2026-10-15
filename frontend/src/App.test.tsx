@@ -81,7 +81,8 @@ describe("restoring a job from ?job=", () => {
     mockFetch((url) => (url.endsWith("/result") ? json(result) : json(status("done", { progress: 1 }))));
     render(<App />);
 
-    expect(await screen.findByText("Готово — вот твоя табулатура")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Группа крови" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Скачать \.gp5/ })).toHaveAttribute("href", `/api/jobs/${JOB_ID}/export.gp5`);
     expect(window.location.search).toBe(`?job=${JOB_ID}`);
   });
 
@@ -104,7 +105,7 @@ describe("restoring a job from ?job=", () => {
     expect(FakeEventSource.instances[0].url).toBe(`/api/jobs/${JOB_ID}/events`);
 
     act(() => FakeEventSource.instances[0].emit(status("done", { progress: 1 })));
-    expect(await screen.findByText("Готово — вот твоя табулатура")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Группа крови" })).toBeInTheDocument();
   });
 
   it("ignores malformed job ids", () => {
@@ -200,5 +201,87 @@ describe("uploading", () => {
     fireEvent.change(input, { target: { files: [new File(["x"], "big.mp4")] } });
     fireEvent.click(screen.getByText("Построить табы"));
     expect(await screen.findByText("Файл слишком большой (лимит — 500 МБ)")).toBeInTheDocument();
+  });
+});
+
+
+describe("cancelling", () => {
+  it("shows 'cancelling after the current step' with a disabled button, then the stopped state", async () => {
+    setUrl(`?job=${JOB_ID}`);
+    const fetchMock = mockFetch((url, init) => {
+      if (init?.method === "POST" && url.endsWith("/cancel")) {
+        return json(status("separating", { cancelRequested: true, message: "Отменяем после текущего шага…" }));
+      }
+      return json(status("separating"));
+    });
+    render(<App />);
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Отменить" }));
+    const pending = await screen.findByRole("button", { name: /Отменяем после текущего шага/ });
+    expect(pending).toBeDisabled();
+    expect(fetchMock).toHaveBeenCalledWith(`/api/jobs/${JOB_ID}/cancel`, expect.objectContaining({ method: "POST" }));
+
+    act(() => FakeEventSource.instances[0].emit(status("cancelled", { message: "Обработка остановлена" })));
+    expect(await screen.findByRole("heading", { name: "Обработка остановлена" })).toBeInTheDocument();
+    expect(FakeEventSource.instances[0].closed).toBe(true);
+    expect(screen.getByRole("button", { name: "Загрузить другой файл" })).toBeInTheDocument();
+  });
+
+  it("shows the queue position while waiting", async () => {
+    setUrl(`?job=${JOB_ID}`);
+    mockFetch(() => json(status("queued", { queuePosition: 2, progress: 0 })));
+    render(<App />);
+    expect(await screen.findByText(/Перед вами 2 трека/)).toBeInTheDocument();
+  });
+
+  it("shows the remaining time estimate", async () => {
+    setUrl(`?job=${JOB_ID}`);
+    mockFetch(() => json(status("separating", { etaSeconds: 185 })));
+    render(<App />);
+    expect(await screen.findByText("осталось ≈ 3 минуты")).toBeInTheDocument();
+  });
+});
+
+describe("result screen", () => {
+  async function openResult() {
+    setUrl(`?job=${JOB_ID}`);
+    mockFetch((url) => (url.endsWith("/result") ? json(result) : json(status("done", { progress: 1 }))));
+    render(<App />);
+    await screen.findByRole("heading", { name: "Группа крови" });
+  }
+
+  it("opens the shortcut list with ? and closes it with Escape", async () => {
+    await openResult();
+    fireEvent.keyDown(window, { code: "Slash", key: "?", shiftKey: true });
+    const dialog = await screen.findByRole("dialog", { name: "Горячие клавиши" });
+    expect(dialog).toHaveTextContent("Петля");
+    fireEvent.keyDown(window, { key: "Escape", code: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Горячие клавиши" })).not.toBeInTheDocument());
+  });
+
+  it("changes speed with + and − and toggles loop / metronome / source by keyboard", async () => {
+    await openResult();
+    fireEvent.keyDown(window, { code: "Equal", key: "=" });
+    expect(await screen.findByRole("button", { name: "Скорость 105%" })).toBeInTheDocument();
+    fireEvent.keyDown(window, { code: "Minus", key: "-" });
+    fireEvent.keyDown(window, { code: "Minus", key: "-" });
+    expect(await screen.findByRole("button", { name: "Скорость 95%" })).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { code: "KeyL", key: "l" });
+    expect(screen.getByRole("button", { name: "Выключить петлю (L)" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.keyDown(window, { code: "KeyM", key: "m" });
+    expect(screen.getByRole("button", { name: "Метроном (M)" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.keyDown(window, { code: "KeyG", key: "g" });
+    expect(screen.getByRole("button", { name: "Оригинал" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("explains an empty result instead of showing a blank sheet", async () => {
+    setUrl(`?job=${JOB_ID}`);
+    const empty = { ...result, tab: { ...result.tab, tracks: [{ name: "Guitar", events: [] }] } };
+    mockFetch((url) => (url.endsWith("/result") ? json(empty) : json(status("done", { progress: 1 }))));
+    render(<App />);
+    expect(await screen.findByText("В записи не нашлось гитарной партии")).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Плеер" })).not.toBeInTheDocument();
   });
 });

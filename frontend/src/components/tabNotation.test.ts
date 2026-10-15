@@ -16,3 +16,15 @@ describe("bend notation", () => {
     expect(techniqueMark({ string: 0, fret: 7 })).toBeNull();
   });
 });
+
+import { bendArrowLabel } from "./tabNotation";
+
+describe("bend arrow labels", () => {
+  it("uses engraved tab conventions", () => {
+    expect(bendArrowLabel(1)).toBe("½");
+    expect(bendArrowLabel(2)).toBe("full");
+    expect(bendArrowLabel(3)).toBe("1½");
+    expect(bendArrowLabel(0.5)).toBe("¼");
+    expect(bendArrowLabel(4)).toBe("2");
+  });
+});
