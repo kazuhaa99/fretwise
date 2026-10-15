@@ -35,6 +35,7 @@ from typing import AsyncIterable, Optional
 
 from ..models import schemas
 from ..pipeline import gp_export, ingest, rhythm, separation, transcription
+from . import edits
 from ..pipeline.fretboard import Fretboard
 from ..pipeline.tab_builder import build_multi_track_tab
 
@@ -188,6 +189,7 @@ class Job:
     finished_at: Optional[float] = None  # `time.monotonic()` when it reached a terminal stage
     duration_seconds: Optional[float] = None  # of the decoded audio, once known
     cancel_requested: bool = False
+    revision: int = 0  # of the tab; bumped by every saved edit
     _subscribers: list[asyncio.Queue] = field(default_factory=list)
 
     @property
@@ -269,6 +271,14 @@ class Job:
     @property
     def tab_path(self) -> Path:
         return self.work_dir / TAB_FILENAME
+
+    @property
+    def original_tab_path(self) -> Path:
+        return self.work_dir / edits.ORIGINAL_TAB_FILENAME
+
+    @property
+    def edited_tab_path(self) -> Path:
+        return self.work_dir / edits.EDITED_TAB_FILENAME
 
 
 class JobManager:
@@ -447,6 +457,45 @@ class JobManager:
         # files; the TTL sweep forgets the record later like any finished job.
         shutil.rmtree(job.work_dir, ignore_errors=True)
 
+    # -- manual edits ----------------------------------------------------------
+
+    def _done_job(self, job_id: str) -> Job:
+        job = self._jobs.get(job_id)
+        if job is None:
+            raise KeyError(job_id)
+        if job.status.stage != "done" or job.result is None:
+            raise JobBusyError("Править можно только готовую табулатуру")
+        return job
+
+    def save_edits(self, job_id: str, base_revision: int, tracks: list[schemas.TabTrack]) -> schemas.JobResult:
+        """Validate and store an edited tab, then rebuild the .gp5 from it.
+
+        Blocking (writes files, exports .gp5) — call it from a worker thread.
+        """
+        job = self._done_job(job_id)
+        if base_revision != job.revision:
+            raise edits.EditConflictError()
+        assert job.result is not None
+        base = job.result.tab
+        edits.validate_tracks(tracks, base)
+        tab = edits.apply_tracks(base, tracks)
+        edits.write_json(tab, job.edited_tab_path)
+        edits.write_gp5(tab, job.tab_path, title=job.title)
+        job.revision += 1
+        job.result = job.result.model_copy(update={"tab": tab, "revision": job.revision, "edited": True})
+        return job.result
+
+    def revert_edits(self, job_id: str) -> schemas.JobResult:
+        """Back to the tab exactly as the pipeline produced it."""
+        job = self._done_job(job_id)
+        assert job.result is not None
+        tab = edits.read_json(job.original_tab_path)
+        edits.write_gp5(tab, job.tab_path, title=job.title)
+        job.edited_tab_path.unlink(missing_ok=True)
+        job.revision += 1
+        job.result = job.result.model_copy(update={"tab": tab, "revision": job.revision, "edited": False})
+        return job.result
+
     def delete(self, job_id: str) -> None:
         """Delete a finished job on the user's request (`DELETE /api/jobs/{id}`).
 
@@ -568,6 +617,8 @@ async def _run_pipeline(job: Job) -> None:
         job.result = _build_result(
             job, status=final_status, tracks=tracks, layout=layout, duration_seconds=duration_seconds
         )
+        # Kept for "revert all edits" (and for restoring jobs after a restart).
+        await _run_blocking(edits.write_json, job.result.tab, job.original_tab_path)
         job._emit(final_status)
 
     except JobCancelled:

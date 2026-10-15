@@ -66,6 +66,8 @@ export interface TabData {
 export interface JobResult {
   job: JobStatus;
   title: string; // sanitized original filename, as used for the .gp5
+  revision: number; // bumped by every saved edit; PUT /tab must send the one it started from
+  edited: boolean; // the tab differs from what the pipeline produced
   tab: TabData;
   originalAudioUrl: string;
   guitarAudioUrl: string;

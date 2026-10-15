@@ -10,6 +10,7 @@ running app, not in the unit-test suite.
 
 from __future__ import annotations
 
+import copy
 import json
 import tempfile
 import threading
@@ -347,3 +348,89 @@ def test_cancel_running_job_over_http_ends_the_sse_stream(client, monkeypatch):
     assert "transcribing" not in stages
     assert client.post(f"/api/jobs/{job_id}/cancel").status_code == 409
     assert client.post("/api/jobs/nope/cancel").status_code == 404
+
+
+def _done_result(client) -> tuple[str, dict]:
+    job_id = _upload(client)
+    assert _wait_for_terminal_stage(client, job_id)["stage"] == "done"
+    return job_id, client.get(f"/api/jobs/{job_id}/result").json()
+
+
+def _gp5_struck_frets(client, job_id) -> list[list[int]]:
+    """Frets of every struck beat, per beat (a chord is one inner list)."""
+    content = client.get(f"/api/jobs/{job_id}/export.gp5").content
+    with tempfile.NamedTemporaryFile(suffix=".gp5", delete=False) as fh:
+        fh.write(content)
+        path = Path(fh.name)
+    try:
+        song = gp.parse(str(path))
+        return [
+            sorted(n.value for n in b.notes if n.type == gp.NoteType.normal)
+            for m in song.tracks[0].measures
+            for b in m.voices[0].beats
+            if any(n.type == gp.NoteType.normal for n in b.notes)
+        ]
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_edit_tab_persists_and_rebuilds_gp5(client):
+    job_id, result = _done_result(client)
+    assert result["revision"] == 0 and result["edited"] is False
+    tracks = copy.deepcopy(result["tab"]["tracks"])
+    first = tracks[0]["events"][0]["notes"][0]
+    first["fret"] = 12 if first["fret"] != 12 else 11
+    new_fret = first["fret"]
+    tracks[0]["events"].pop()  # delete the last event
+
+    response = client.put(f"/api/jobs/{job_id}/tab", json={"baseRevision": 0, "tracks": tracks})
+    assert response.status_code == 200, response.text
+    saved = response.json()
+    assert saved["revision"] == 1 and saved["edited"] is True
+    assert saved["tab"]["tracks"][0]["events"][0]["notes"][0]["fret"] == new_fret
+    assert saved["tab"]["measureTimes"] == result["tab"]["measureTimes"]
+
+    # The result endpoint and the .gp5 both reflect the edit.
+    again = client.get(f"/api/jobs/{job_id}/result").json()
+    assert again["tab"] == saved["tab"]
+    beats = _gp5_struck_frets(client, job_id)
+    assert new_fret in beats[0]
+    assert len(beats) == len(result["tab"]["tracks"][0]["events"]) - 1
+
+
+def test_stale_revision_is_refused(client):
+    job_id, result = _done_result(client)
+    tracks = result["tab"]["tracks"]
+    assert client.put(f"/api/jobs/{job_id}/tab", json={"baseRevision": 0, "tracks": tracks}).status_code == 200
+    stale = client.put(f"/api/jobs/{job_id}/tab", json={"baseRevision": 0, "tracks": tracks})
+    assert stale.status_code == 409
+    assert "другой вкладке" in stale.json()["detail"]
+
+
+def test_invalid_edit_gets_a_readable_422_and_changes_nothing(client):
+    job_id, result = _done_result(client)
+    tracks = result["tab"]["tracks"]
+    tracks[0]["events"][0]["notes"][0]["string"] = 9
+    response = client.put(f"/api/jobs/{job_id}/tab", json={"baseRevision": 0, "tracks": tracks})
+    assert response.status_code == 422
+    assert response.json()["detail"].startswith("Правка не сохранена: ")
+    assert client.get(f"/api/jobs/{job_id}/result").json()["revision"] == 0
+
+
+def test_revert_restores_the_pipeline_output(client):
+    job_id, result = _done_result(client)
+    original_frets = _gp5_struck_frets(client, job_id)
+    tracks = copy.deepcopy(result["tab"]["tracks"])
+    tracks[0]["events"] = tracks[0]["events"][:1]
+    client.put(f"/api/jobs/{job_id}/tab", json={"baseRevision": 0, "tracks": tracks})
+
+    reverted = client.delete(f"/api/jobs/{job_id}/edits")
+    assert reverted.status_code == 200
+    body = reverted.json()
+    assert body["edited"] is False and body["revision"] == 2
+    assert body["tab"] == result["tab"]
+    assert _gp5_struck_frets(client, job_id) == original_frets
+
+
+def test_editing_requires_a_finished_job(client):
+    assert client.put("/api/jobs/nope/tab", json={"baseRevision": 0, "tracks": []}).status_code == 404

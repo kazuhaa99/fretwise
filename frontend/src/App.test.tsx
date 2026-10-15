@@ -34,6 +34,8 @@ const status = (stage: JobStatus["stage"], extra: Partial<JobStatus> = {}): JobS
 const result: JobResult = {
   job: status("done", { progress: 1 }),
   title: "Группа крови",
+  revision: 0,
+  edited: false,
   tab: {
     tuning: ["E2", "A2", "D3", "G3", "B3", "E4"],
     capo: 0,

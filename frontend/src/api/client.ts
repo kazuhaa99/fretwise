@@ -1,4 +1,4 @@
-import type { JobResult, JobStatus, TabSettings } from "../types";
+import type { JobResult, JobStatus, TabSettings, TabTrack } from "../types";
 
 const BASE = "/api";
 
@@ -121,6 +121,20 @@ export async function getJobResult(jobId: string): Promise<JobResult> {
 
 export async function deleteJob(jobId: string): Promise<void> {
   return request<void>(`${BASE}/jobs/${jobId}`, { method: "DELETE" });
+}
+
+/** Save an edited copy of the tab's tracks; the server rebuilds the .gp5. */
+export async function saveTab(jobId: string, baseRevision: number, tracks: TabTrack[]): Promise<JobResult> {
+  return request<JobResult>(`${BASE}/jobs/${jobId}/tab`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ baseRevision, tracks }),
+  });
+}
+
+/** Throw away every manual edit and go back to the pipeline's output. */
+export async function revertEdits(jobId: string): Promise<JobResult> {
+  return request<JobResult>(`${BASE}/jobs/${jobId}/edits`, { method: "DELETE" });
 }
 
 export function jobEventsUrl(jobId: string): string {

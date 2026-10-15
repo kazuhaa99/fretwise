@@ -77,6 +77,8 @@ const done = { id: JOB, stage: "done", progress: 1, message: "Готово!", et
 const result = {
   job: done,
   title: "Кино — Группа крови (live)",
+  revision: 0,
+  edited: false,
   tab,
   originalAudioUrl: `/api/jobs/${JOB}/audio/original`,
   guitarAudioUrl: `/api/jobs/${JOB}/audio/guitar`,

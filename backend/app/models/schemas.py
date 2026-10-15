@@ -140,6 +140,19 @@ class JobResult(BaseModel):
     job: JobStatus
     title: str = ""  # sanitized original filename, as used for the .gp5
     tab: TabData
+    # Bumped on every saved edit; a save must name the revision it started
+    # from (see `TabEditRequest`). `edited` = differs from the pipeline output.
+    revision: int = 0
+    edited: bool = False
     original_audio_url: str = Field(alias="originalAudioUrl")
     guitar_audio_url: str = Field(alias="guitarAudioUrl")
     gp5_url: str = Field(alias="gp5Url")
+
+
+class TabEditRequest(BaseModel):
+    """PUT /api/jobs/{id}/tab — replace the tab's tracks with an edited copy."""
+
+    model_config = _camel_config
+
+    base_revision: int = Field(alias="baseRevision")
+    tracks: list[TabTrack]
