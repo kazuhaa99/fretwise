@@ -2,7 +2,7 @@
 
 Fretwise is a local web app that turns audio or video into guitar tablature. It isolates the guitar part, detects notes and arranges them into tabs **a human can actually play**, so you never get impossible stretches like `1-3-15-17-18` in one chord.
 
-![Fretwise upload screen](docs/screenshot.png)
+![Fretwise tab viewer](docs/screenshot.png)
 
 The resulting tab plays back in the browser with a cursor synced to the audio, and you can export it to `.gp5` for Guitar Pro. Everything runs locally: your files and the models stay on your machine.
 
@@ -15,10 +15,23 @@ The resulting tab plays back in the browser with a cursor synced to the audio, a
 - **Bends and vibrato** read from Basic Pitch's pitch contours, including whole-step bends the tracker splits into two notes
 - **Bar lines that follow the music**: beat tracking, 3/4 vs 4/4 detection and downbeat alignment, with pickup bars when needed
 - Tunable settings: guitar tuning (Standard, Drop D, Eb, Open D), capo, max fret span, position-shift weight
-- Real-time processing progress over **Server-Sent Events**
-- Tab viewer with playback of the isolated stem or the original mix and a synced cursor
+- Real-time processing progress over **Server-Sent Events**, with queue position, a remaining-time estimate and cancellation
+- **Tab viewer laid out like a score**: bars wrap into rows, a bar's width follows how many notes it holds, bar numbers, time signature and tempo, automatic section labels (A, B…) when the material clearly repeats
+- Playing techniques drawn the engraved way: P.M. with a dashed extender, bend arrows (½, full…), vibrato waves, hammer-on/pull-off arcs, slides
+- **Floating player**: smooth cursor and current-bar highlight, click a note or bar to jump there, speed 25–150% without changing pitch, loop over selected bars, count-in, metronome on the detected beats, original mix or isolated guitar, volume, follow-the-cursor mode
+- Keyboard shortcuts (Space, ←/→, L, +/−, M, C, G, ?) with an in-app list
+- Light and dark themes («Шалфей» palette, WCAG AA contrast), usable from a 375 px phone to a wide monitor
+- The job lives in the URL (`?job=…`), so a reload brings you back to the same progress screen or result
 - **Export to Guitar Pro** (`.gp5`) via PyGuitarPro
 - One-command **Docker Compose** setup
+
+## Screens
+
+| Upload | Processing | Result on a phone |
+|---|---|---|
+| ![Upload](docs/screenshots/upload-desktop-light.png) | ![Processing](docs/screenshots/processing-desktop-light.png) | ![Result, phone, dark](docs/screenshots/result-phone-dark.png) |
+
+More in [`docs/screenshots/`](docs/screenshots). They are generated from the production build with a built-in demo job (no backend needed): `cd frontend && npm run build && npm run screenshots` (requires Playwright with Chromium).
 
 ## How it works
 
@@ -28,7 +41,20 @@ The resulting tab plays back in the browser with a cursor synced to the audio, a
 4. **Fingering**: `tab_builder.py` assigns notes to strings and frets. It never emits a chord whose fretted notes exceed the hand span or share a string, and it keeps the fretting hand in one position as long as possible.
 5. **Rhythm**: `rhythm.py` tracks beats with librosa, chooses between 3/4 and 4/4 and finds the first downbeat, so bars line up with the music.
 6. **Export**: [PyGuitarPro](https://github.com/Perlence/PyGuitarPro) writes the result to `.gp5` with the real tuning, the capo in the track's capo field, and bends and vibrato as Guitar Pro effects.
-7. **UI**: a React app streams progress, plays the isolated or original track and renders the tab with a playback cursor.
+7. **UI**: a React app streams progress, plays the isolated or original track and renders the tab bar by bar with a playback cursor.
+
+### HTTP API
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/jobs` | Upload a file (`file`) with `settings` (JSON) and start a job |
+| `GET` | `/api/jobs/{id}` | Job status: stage, progress, `queuePosition`, `etaSeconds`, `cancelRequested` |
+| `GET` | `/api/jobs/{id}/events` | The same status as a Server-Sent Events stream |
+| `POST` | `/api/jobs/{id}/cancel` | Cancel: immediately while queued, after the current step while running |
+| `GET` | `/api/jobs/{id}/result` | Tab data (tracks, bars, beats, tempo, meter) and file URLs |
+| `GET` | `/api/jobs/{id}/audio/{original\|guitar}` | Audio for playback (supports range requests) |
+| `GET` | `/api/jobs/{id}/export.gp5` | Guitar Pro file named after the upload |
+| `DELETE` | `/api/jobs/{id}` | Delete a finished job and its files |
 
 ## Tech stack
 
@@ -37,9 +63,9 @@ The resulting tab plays back in the browser with a cursor synced to the audio, a
 | Backend | Python 3.11, FastAPI, Uvicorn, Pydantic, sse-starlette |
 | ML / audio | PyTorch, Demucs, Basic Pitch (ONNX), librosa, ffmpeg |
 | Export | PyGuitarPro |
-| Frontend | React 19, TypeScript, Vite, Tailwind CSS |
+| Frontend | React 19, TypeScript, Vite, Tailwind CSS 4, Web Audio, Golos Text and JetBrains Mono (bundled) |
 | Infra | Docker, Docker Compose, nginx |
-| Tests | pytest, httpx |
+| Tests | pytest, httpx, Vitest, Testing Library |
 
 ## Getting started
 
@@ -132,8 +158,10 @@ The unit tests cover the fretboard model, the tab builder (span and string const
 ├── frontend/
 │   ├── src/
 │   │   ├── api/          # Typed API client
-│   │   ├── components/   # UploadDropzone, SettingsPanel, ProcessingTimeline, AudioPlayer, TabViewer
+│   │   ├── components/   # UploadScreen, SettingsPanel, ProcessingScreen, ResultScreen, TabSheet, PlayerBar
+│   │   ├── lib/          # barLayout, sections, playback, hotkeys, tuning (pure, unit-tested)
 │   │   └── App.tsx
+│   ├── scripts/          # screenshots.mjs (Playwright, demo job, no backend)
 │   ├── nginx.conf        # Production proxy config
 │   └── Dockerfile
 └── docker-compose.yml
