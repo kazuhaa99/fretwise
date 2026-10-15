@@ -22,6 +22,8 @@ _FIELD_LABELS = {
     "max_fret_span": "максимальная растяжка",
     "positionJumpWeight": "вес переходов по грифу",
     "position_jump_weight": "вес переходов по грифу",
+    "openStrings": "открытые струны",
+    "open_strings": "открытые струны",
     "file": "файл",
     "settings": "настройки",
 }

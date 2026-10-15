@@ -13,7 +13,9 @@ from urllib.parse import quote
 from fastapi.responses import FileResponse, Response
 
 from ..jobs import edits
+from ..pipeline.fretboard import Fretboard
 from ..pipeline.midi_export import export_midi
+from ..pipeline.tab_builder import FingeringStyle, refinger
 from ..pipeline.text_export import export_text
 from ..jobs.manager import JobBusyError, JobManager
 from ..models import schemas
@@ -84,6 +86,50 @@ def get_router(manager: JobManager) -> APIRouter:
             ) from None
         except edits.EditError as exc:
             raise HTTPException(status_code=422, detail=f"Правка не сохранена: {exc}") from exc
+
+    @router.post("/{job_id}/refinger", response_model=schemas.RefingerResponse)
+    async def refinger_events(job_id: str, body: schemas.RefingerRequest) -> schemas.RefingerResponse:
+        """Re-finger the given notes (same pitches, new strings/frets).
+
+        Nothing is saved: the client puts the result into its edit history
+        and saves it like any other edit, so it can be undone with Ctrl+Z.
+        """
+        job = _require_done_job(job_id)
+        assert job.result is not None
+        base = job.result.tab
+        probe = base.model_copy(update={"tracks": [schemas.TabTrack(name="", events=body.events)] * len(base.tracks)})
+        try:
+            edits.validate_tracks(probe.tracks, base)
+        except edits.EditError as exc:
+            raise HTTPException(status_code=422, detail=f"Не получилось переложить: {exc}") from exc
+
+        fretboard = Fretboard.from_note_names(base.tuning, capo=base.capo, max_fret=edits.MAX_FRET)
+        style = FingeringStyle(open_strings=body.open_strings, target_position=body.position)
+        moved = refinger(
+            edits.to_events(schemas.TabTrack(name="", events=body.events)),
+            fretboard,
+            max_fret_span=job.settings.max_fret_span,
+            position_jump_weight=job.settings.position_jump_weight,
+            style=style,
+        )
+        return schemas.RefingerResponse(
+            events=[
+                schemas.TabEvent(
+                    time=e.time,
+                    duration=e.duration,
+                    notes=[
+                        schemas.TabNote(
+                            string=n.string,
+                            fret=n.fret,
+                            technique=n.technique,
+                            bend_semitones=n.bend_semitones if n.technique == "bend" else None,
+                        )
+                        for n in e.notes
+                    ],
+                )
+                for e in moved
+            ]
+        )
 
     @router.delete("/{job_id}/edits", response_model=schemas.JobResult)
     async def revert_tab(job_id: str) -> schemas.JobResult:

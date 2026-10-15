@@ -74,6 +74,9 @@ class TabSettings(BaseModel):
     capo: int = Field(0, ge=0, le=MAX_CAPO)
     max_fret_span: int = Field(4, alias="maxFretSpan", ge=2, le=8)
     position_jump_weight: float = Field(1.0, alias="positionJumpWeight", ge=0.0, le=4.0)
+    # "auto": open strings when they're easier (open-position playing);
+    # "avoid": play in position, e.g. chords with the thumb over the top.
+    open_strings: Literal["auto", "avoid"] = Field("auto", alias="openStrings")
 
     @field_validator("tuning")
     @classmethod
@@ -173,3 +176,18 @@ class JobSummary(BaseModel):
     duration_seconds: Optional[float] = Field(None, alias="durationSeconds")
     edited: bool = False
     error: Optional[str] = None
+
+
+class RefingerRequest(BaseModel):
+    """POST /api/jobs/{id}/refinger — re-choose strings/frets for some notes."""
+
+    model_config = _camel_config
+
+    events: list[TabEvent]
+    # Pull every note towards this fret (None: just apply `open_strings`).
+    position: Optional[int] = Field(None, ge=1, le=20)
+    open_strings: Literal["auto", "avoid"] = Field("avoid", alias="openStrings")
+
+
+class RefingerResponse(BaseModel):
+    events: list[TabEvent]

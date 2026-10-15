@@ -38,7 +38,7 @@ from ..models import schemas
 from ..pipeline import gp_export, ingest, rhythm, separation, transcription
 from . import edits
 from ..pipeline.fretboard import Fretboard
-from ..pipeline.tab_builder import build_multi_track_tab
+from ..pipeline.tab_builder import FingeringStyle, build_multi_track_tab
 
 ACCEPTED_EXTENSIONS = {
     ".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg",
@@ -668,6 +668,7 @@ async def _run_pipeline(job: Job) -> None:
             fretboard,
             max_fret_span=job.settings.max_fret_span,
             position_jump_weight=job.settings.position_jump_weight,
+            style=FingeringStyle(open_strings=job.settings.open_strings),
         )
         job.publish(stage="arranging", progress=1.0, message="Аппликатура подобрана")
 

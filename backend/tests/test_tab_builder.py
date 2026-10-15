@@ -1,5 +1,7 @@
 import random
 
+import pytest
+
 from app.pipeline.fretboard import Fretboard, note_name_to_midi
 from app.pipeline.tab_builder import (
     Note,
@@ -310,3 +312,72 @@ def test_slow_deliberate_restrikes_get_no_special_marking():
     techniques = [n.technique for event in tab for n in event.notes]
 
     assert all(t is None for t in techniques)
+
+
+# -- fingering style: open strings vs. playing in position --------------------
+
+from app.pipeline.tab_builder import FingeringStyle, TabEvent, TabNote, refinger  # noqa: E402
+
+
+def _hendrix_a(fretboard, *, arpeggio: bool):
+    """5-x-7-6-5-x (A with the thumb over the top), then the same with 6 on
+    the B string — the passage from a real-track report. As an arpeggio each
+    note rings into the next; as strums the four notes sound together."""
+    shape1 = [fretboard.open_pitch(0) + 5, fretboard.open_pitch(2) + 7, fretboard.open_pitch(3) + 6, fretboard.open_pitch(4) + 5]
+    shape2 = shape1[:3] + [fretboard.open_pitch(4) + 6]
+    notes, t = [], 0.0
+    for shape in (shape1, shape1, shape2, shape2):
+        if arpeggio:
+            for pitch in shape:
+                notes.append(Note(pitch, onset=t, duration=0.9))
+                t += 0.2
+        else:
+            notes.extend(Note(pitch, onset=t, duration=0.45) for pitch in shape)
+            t += 0.5
+    return notes
+
+
+def _shape(tab):
+    return [(n.string, n.fret) for e in tab for n in e.notes]
+
+
+@pytest.mark.parametrize("arpeggio", [True, False])
+def test_avoiding_open_strings_finds_the_position_shape(arpeggio):
+    tab = build_tab(_hendrix_a(STANDARD, arpeggio=arpeggio), STANDARD, style=FingeringStyle(open_strings="avoid"))
+    expected = [(0, 5), (2, 7), (3, 6), (4, 5)] * 2 + [(0, 5), (2, 7), (3, 6), (4, 6)] * 2
+    assert sorted(_shape(tab)) == sorted(expected)
+    if arpeggio:
+        assert _shape(tab) == expected
+
+
+def test_default_style_still_prefers_open_position():
+    tab = build_tab(_hendrix_a(STANDARD, arpeggio=True), STANDARD)
+    assert _shape(tab)[:4] == [(1, 0), (3, 2), (4, 2), (5, 0)]  # A0 G2 B2 e0
+
+
+def test_refinger_moves_a_passage_to_a_chosen_position_keeping_pitches_and_techniques():
+    tab = build_tab(_hendrix_a(STANDARD, arpeggio=True), STANDARD)
+    tab[1].notes[0].technique = "vibrato"
+    moved = refinger(tab, STANDARD, style=FingeringStyle(target_position=5))
+    assert _shape(moved)[:4] == [(0, 5), (2, 7), (3, 6), (4, 5)]
+    pitch = lambda n: STANDARD.open_pitch(n.string) + n.fret  # noqa: E731
+    assert [pitch(n) for e in moved for n in e.notes] == [pitch(n) for e in tab for n in e.notes]
+    assert [e.time for e in moved] == [e.time for e in tab]
+    assert moved[1].notes[0].technique == "vibrato"
+
+
+def test_refinger_keeps_notes_that_cannot_move():
+    # E2 only exists as the open low E: it must survive "avoid open strings".
+    events = [TabEvent(time=0.0, duration=0.5, notes=[TabNote(string=0, fret=0)])]
+    moved = refinger(events, STANDARD, style=FingeringStyle(open_strings="avoid", target_position=7))
+    assert _shape(moved) == [(0, 0)]
+
+
+def test_notes_inside_the_hand_reach_are_not_position_jumps():
+    # A melody within one four-fret box shouldn't be pulled to open strings
+    # just because consecutive notes are a couple of frets apart.
+    g = STANDARD.open_pitch(3)
+    notes = [Note(g + f, onset=i * 0.3, duration=0.25) for i, f in enumerate([7, 9, 10, 9, 7, 9])]
+    tab = build_tab(notes, STANDARD, style=FingeringStyle(open_strings="avoid"))
+    frets = [n.fret for e in tab for n in e.notes]
+    assert max(frets) - min(frets) <= 4

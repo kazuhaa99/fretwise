@@ -542,3 +542,37 @@ def test_expired_jobs_are_dropped_on_restart(tmp_path):
     with TestClient(create_app(jobs_root=jobs_root, job_ttl_hours=1.0)) as second:
         assert second.get(f"/api/jobs/{job_id}").status_code == 404
         assert not (jobs_root / job_id).exists()
+
+
+def test_refinger_endpoint_moves_notes_to_a_position_without_saving(client):
+    job_id, result = _done_result(client)
+    # Open-position A shape (A0 G2 B2 e0) → 5th position.
+    events = [
+        {"time": 0.0, "duration": 0.9, "notes": [{"string": 1, "fret": 0}]},
+        {"time": 0.2, "duration": 0.9, "notes": [{"string": 3, "fret": 2, "technique": "vibrato"}]},
+        {"time": 0.4, "duration": 0.9, "notes": [{"string": 4, "fret": 2}]},
+        {"time": 0.6, "duration": 0.9, "notes": [{"string": 5, "fret": 0}]},
+    ]
+    response = client.post(f"/api/jobs/{job_id}/refinger", json={"events": events, "position": 5})
+    assert response.status_code == 200, response.text
+    moved = response.json()["events"]
+    assert [(e["notes"][0]["string"], e["notes"][0]["fret"]) for e in moved] == [(0, 5), (2, 7), (3, 6), (4, 5)]
+    assert moved[1]["notes"][0]["technique"] == "vibrato"
+    assert [e["time"] for e in moved] == [0.0, 0.2, 0.4, 0.6]
+    # Not saved: the job is untouched until the client saves the edit.
+    assert client.get(f"/api/jobs/{job_id}/result").json()["revision"] == 0
+
+    bad = client.post(f"/api/jobs/{job_id}/refinger", json={"events": [{"time": 0, "duration": 1, "notes": [{"string": 9, "fret": 0}]}]})
+    assert bad.status_code == 422
+    assert bad.json()["detail"].startswith("Не получилось переложить")
+
+
+def test_open_strings_setting_is_validated(client):
+    with FIXTURE.open("rb") as fh:
+        response = client.post(
+            "/api/jobs",
+            files={"file": ("a.wav", fh, "audio/wav")},
+            data={"settings": json.dumps({**SETTINGS, "openStrings": "sometimes"})},
+        )
+    assert response.status_code == 422
+    assert "открытые струны" in response.json()["detail"]

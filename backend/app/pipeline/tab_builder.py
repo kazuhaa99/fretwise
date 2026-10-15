@@ -277,39 +277,129 @@ def _nearest_reachable_pitch(fretboard: Fretboard, pitch: int) -> int | None:
     return None
 
 
-def _voicing_position(voicing: Voicing) -> float:
-    """A representative fret for the fretting-hand position this voicing implies."""
+def _voicing_position(voicing: Voicing) -> float | None:
+    """A representative fret for the fretting-hand position this voicing
+    implies, or None for open strings only — those don't need the hand
+    anywhere in particular."""
     fretted = [f for _, f in voicing if f > 0]
-    return (sum(fretted) / len(fretted)) if fretted else 0.0
+    return (sum(fretted) / len(fretted)) if fretted else None
 
 
-def _voicing_ease_cost(voicing: Voicing) -> float:
-    """Lower is easier: rewards open strings and tight, low-fret shapes."""
+# The fretting hand covers about this many frets either side of its centre
+# without moving (one finger per fret over a four-fret box). Notes inside that
+# reach — 5th and 7th fret of the same chord shape — are not a "jump".
+_HAND_REACH = 2.0
+
+
+def _jump(a: float | None, b: float | None) -> float:
+    """How far the hand has to shift between two positions (frets)."""
+    if a is None or b is None:
+        return 0.0
+    return max(0.0, abs(a - b) - _HAND_REACH)
+
+
+@dataclass(frozen=True)
+class FingeringStyle:
+    """How to choose among playable voicings of the same notes.
+
+    The same pitches can usually be fingered in several places — an A chord
+    as x-0-2-2-2-0 in open position or 5-x-7-6-5-x up the neck with the thumb
+    over the top, Hendrix-style — and the audio alone barely tells them apart.
+    The default leans towards open strings (the most common way to play most
+    things); `open_strings="avoid"` leans towards playing in position, and
+    `target_position` (used when the user re-fingers a passage) pulls every
+    note towards a chosen fret.
+    """
+
+    open_strings: str = "auto"  # "auto" | "avoid"
+    target_position: int | None = None
+
+
+DEFAULT_STYLE = FingeringStyle()
+
+_OPEN_BONUS = 0.9  # "auto": an open string is easier than a fretted note
+_OPEN_PENALTY = 4.0  # "avoid": open strings only when nothing fretted fits
+_TARGET_WEIGHT = 3.0  # per fret outside the chosen position's reach
+_LOW_FRET_WEIGHT = 0.25
+_LOW_FRET_WEIGHT_IN_POSITION = 0.05
+
+
+def _voicing_ease_cost(voicing: Voicing, style: FingeringStyle = DEFAULT_STYLE, max_span: int = 4) -> float:
+    """Lower is easier: tight, low-fret shapes; open strings per `style`."""
     fretted = [f for _, f in voicing if f > 0]
     open_count = sum(1 for _, f in voicing if f == 0)
     span = (max(fretted) - min(fretted)) if fretted else 0
     avg_fret = (sum(fretted) / len(fretted)) if fretted else 0.0
-    return span * 1.4 + avg_fret * 0.25 - open_count * 0.9
+    avoid_open = style.open_strings == "avoid" or style.target_position is not None
+    # Low frets are "easier" only for open-position playing; someone playing
+    # in position doesn't care whether it's the 2nd or the 7th fret, and the
+    # pull towards the nut would drag a held shape apart note by note.
+    cost = span * 1.4 + avg_fret * (_LOW_FRET_WEIGHT_IN_POSITION if avoid_open else _LOW_FRET_WEIGHT)
+    # Asking for a position implies leaving open strings out of it too.
+    cost += open_count * (_OPEN_PENALTY if avoid_open else -_OPEN_BONUS)
+    if style.target_position is not None:
+        low = style.target_position
+        high = style.target_position + max_span
+        for f in fretted:
+            cost += _TARGET_WEIGHT * max(0, low - f, f - high)
+    return cost
 
 
-def _prune(voicings: list[Voicing], limit: int = MAX_VOICINGS_PER_EVENT) -> list[Voicing]:
+def _prune(
+    voicings: list[Voicing],
+    limit: int = MAX_VOICINGS_PER_EVENT,
+    style: FingeringStyle = DEFAULT_STYLE,
+    max_span: int = 4,
+) -> list[Voicing]:
     if len(voicings) <= limit:
         return voicings
-    return sorted(voicings, key=_voicing_ease_cost)[:limit]
+    # Pruned by the same cost the search uses — otherwise the voicing a style
+    # asks for (say, everything at the 5th fret) could be dropped before the
+    # search ever sees it.
+    return sorted(voicings, key=lambda v: _voicing_ease_cost(v, style, max_span))[:limit]
+
+
+# Shape coherence between a note and the one still ringing before it: an
+# arpeggiated chord is held as one shape, so both must sit under one hand.
+_SHAPE_SPREAD_WEIGHT = 0.5  # per fret of spread across the two voicings
+_SHAPE_OUT_OF_REACH = 3.0  # the two can't be held at once within max_span
+_SHAPE_STRING_CUT = 0.4  # re-using the ringing string cuts the earlier note short
+
+
+def _shape_cost(previous: Voicing, current: Voicing, max_span: int) -> float:
+    fretted = [f for _, f in previous if f > 0] + [f for _, f in current if f > 0]
+    cost = 0.0
+    if fretted:
+        spread = max(fretted) - min(fretted)
+        cost += spread * _SHAPE_SPREAD_WEIGHT
+        if spread > max_span:
+            cost += _SHAPE_OUT_OF_REACH
+    if {s for s, _ in previous} & {s for s, _ in current}:
+        cost += _SHAPE_STRING_CUT
+    return cost
 
 
 def _best_voicing_sequence(
     candidates: list[list[Voicing]],
     position_jump_weight: float,
+    style: FingeringStyle = DEFAULT_STYLE,
+    max_span: int = 4,
+    ringing: list[bool] | None = None,
 ) -> list[Voicing]:
-    """Viterbi search: minimize sum of (ease cost + weighted hand-position jumps)."""
+    """Viterbi search: minimize sum of (ease cost + weighted hand-position jumps).
+
+    `ringing[i]` says event i-1 is still sounding when event i starts (an
+    arpeggio over a held chord, notes let ring): then the pair is also scored
+    as one hand shape (`_shape_cost`). Without that, each note of a held
+    chord was fingered on its own, scattering one shape across positions.
+    """
     n = len(candidates)
     if n == 0:
         return []
 
     inf = float("inf")
     positions = [[_voicing_position(v) for v in step] for step in candidates]
-    ease = [[_voicing_ease_cost(v) for v in step] for step in candidates]
+    ease = [[_voicing_ease_cost(v, style, max_span) for v in step] for step in candidates]
 
     dp: list[list[float]] = [[inf] * len(candidates[i]) for i in range(n)]
     backptr: list[list[int]] = [[-1] * len(candidates[i]) for i in range(n)]
@@ -323,8 +413,10 @@ def _best_voicing_sequence(
             for j in range(len(candidates[i - 1])):
                 if dp[i - 1][j] == inf:
                     continue
-                jump = abs(positions[i][k] - positions[i - 1][j]) * position_jump_weight
+                jump = _jump(positions[i][k], positions[i - 1][j]) * position_jump_weight
                 cost = dp[i - 1][j] + jump + ease[i][k]
+                if ringing and ringing[i]:
+                    cost += _shape_cost(candidates[i - 1][j], candidates[i][k], max_span)
                 if cost < best_cost:
                     best_cost, best_prev = cost, j
             dp[i][k] = best_cost
@@ -516,6 +608,7 @@ def build_multi_track_tab(
     *,
     max_fret_span: int = 4,
     position_jump_weight: float = 1.0,
+    style: FingeringStyle = DEFAULT_STYLE,
 ) -> list[list[TabEvent]]:
     """Split a performance into independent guitar parts and arrange each one.
 
@@ -527,7 +620,7 @@ def build_multi_track_tab(
     """
     voices = separate_voices(notes, fretboard, max_fret_span)
     tracks = [
-        build_tab(voice, fretboard, max_fret_span=max_fret_span, position_jump_weight=position_jump_weight)
+        build_tab(voice, fretboard, max_fret_span=max_fret_span, position_jump_weight=position_jump_weight, style=style)
         for voice in voices
     ]
     return [track for track in tracks if track]
@@ -539,6 +632,7 @@ def build_tab(
     *,
     max_fret_span: int = 4,
     position_jump_weight: float = 1.0,
+    style: FingeringStyle = DEFAULT_STYLE,
 ) -> list[TabEvent]:
     """Convert transcribed notes into a sequence of playable tab events.
 
@@ -581,12 +675,18 @@ def build_tab(
         if not voicings:
             continue
 
-        prepared.append((time, duration, _prune(voicings), expressive))
+        prepared.append((time, duration, _prune(voicings, style=style, max_span=max_fret_span), expressive))
 
     if not prepared:
         return []
 
-    chosen = _best_voicing_sequence([voicings for _, _, voicings, _ in prepared], position_jump_weight)
+    chosen = _best_voicing_sequence(
+        [voicings for _, _, voicings, _ in prepared],
+        position_jump_weight,
+        style,
+        max_fret_span,
+        ringing=_ringing([(time, duration) for time, duration, _, _ in prepared]),
+    )
 
     tab_events: list[TabEvent] = []
     for (time, duration, _, expressive), voicing in zip(prepared, chosen):
@@ -604,3 +704,70 @@ def build_tab(
 
     _annotate_techniques(tab_events)
     return tab_events
+
+
+# How far into the next note the previous one must still sound to count as
+# held together (shorter overlaps are release jitter, not a held shape).
+_RING_OVERLAP = 0.05
+
+
+def _ringing(spans: list[tuple[float, float]]) -> list[bool]:
+    """For each event, whether the previous one is still ringing at its onset."""
+    return [False] + [
+        prev_time + prev_duration - time > _RING_OVERLAP
+        for (prev_time, prev_duration), (time, _) in zip(spans, spans[1:])
+    ]
+
+
+# When re-fingering the user's own notes, a wider stretch is allowed before
+# giving up on keeping every note: dropping notes the user put there is worse
+# than an awkward shape they can still fix by hand.
+_REFINGER_MAX_SPAN = 7
+
+
+def refinger(
+    events: list[TabEvent],
+    fretboard: Fretboard,
+    *,
+    max_fret_span: int = 4,
+    position_jump_weight: float = 1.0,
+    style: FingeringStyle = DEFAULT_STYLE,
+) -> list[TabEvent]:
+    """Choose new strings and frets for existing events, keeping what sounds.
+
+    Pitches, timing and techniques stay exactly as they are; only *where* each
+    note is played changes, by the same search `build_tab` uses (so the same
+    playability rules and hand-position economy apply), steered by `style` —
+    typically "play this passage in 5th position". Used by the editor's
+    "re-finger selected bars" action.
+    """
+    candidates: list[list[Voicing]] = []
+    for event in events:
+        pitches = sorted({fretboard.open_pitch(n.string) + n.fret for n in event.notes})
+        voicings = _voicings_for_pitches(fretboard, pitches, max_fret_span)
+        if not voicings:
+            voicings = _voicings_for_pitches(fretboard, pitches, max(max_fret_span, _REFINGER_MAX_SPAN))
+        if not voicings:
+            # Nothing better exists: keep the event exactly as the user had it.
+            voicings = [tuple(sorted(((n.string, n.fret) for n in event.notes), key=lambda sf: fretboard.open_pitch(sf[0]) + sf[1]))]
+        candidates.append(_prune(voicings, style=style, max_span=max_fret_span))
+
+    chosen = _best_voicing_sequence(
+        candidates, position_jump_weight, style, max_fret_span, ringing=_ringing([(e.time, e.duration) for e in events])
+    )
+
+    out: list[TabEvent] = []
+    for event, voicing in zip(events, chosen):
+        by_pitch = {fretboard.open_pitch(n.string) + n.fret: n for n in event.notes}
+        notes_out = []
+        for string_index, fret in voicing:
+            source = by_pitch.get(fretboard.open_pitch(string_index) + fret)
+            notes_out.append(TabNote(
+                string=string_index,
+                fret=fret,
+                technique=source.technique if source else None,
+                bend_semitones=source.bend_semitones if source else None,
+                bend_release=source.bend_release if source else False,
+            ))
+        out.append(TabEvent(time=event.time, duration=event.duration, notes=notes_out))
+    return out

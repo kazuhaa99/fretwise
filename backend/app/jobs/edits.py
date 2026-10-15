@@ -125,7 +125,7 @@ def grid_from_tab(tab: schemas.TabData) -> BeatGrid:
     return BeatGrid.uniform(tab.tempo_bpm, tab.beats_per_measure)
 
 
-def _to_events(track: schemas.TabTrack) -> list[TabEvent]:
+def to_events(track: schemas.TabTrack) -> list[TabEvent]:
     return [
         TabEvent(
             time=e.time,
@@ -150,7 +150,7 @@ def write_gp5(tab: schemas.TabData, path: Path, *, title: str) -> None:
     fretboard = Fretboard.from_note_names(tab.tuning, capo=tab.capo, max_fret=MAX_FRET)
     tmp = path.with_suffix(".tmp.gp5")
     gp_export.export_gp5(
-        [_to_events(track) for track in tab.tracks],
+        [to_events(track) for track in tab.tracks],
         fretboard,
         tmp,
         title=title,
