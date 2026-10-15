@@ -195,6 +195,23 @@ await shot("result-loop-desktop-light", {
     await page.keyboard.press("KeyL");
   },
 });
+await shot("edit-desktop-light", {
+  viewport: DESKTOP,
+  query: `?job=${JOB}`,
+  prepare: async (page) => {
+    await page.getByRole("button", { name: "Править" }).click();
+    await page.locator('[data-note="24:0"]').click();
+  },
+});
+await shot("edit-phone-dark", {
+  viewport: PHONE,
+  scheme: "dark",
+  query: `?job=${JOB}`,
+  prepare: async (page) => {
+    await page.getByRole("button", { name: "Править" }).click();
+    await page.locator('[data-note="2:0"]').click();
+  },
+});
 await shot("shortcuts-desktop-dark", {
   viewport: DESKTOP,
   scheme: "dark",

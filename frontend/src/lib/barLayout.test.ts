@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TabEvent } from "../types";
-import { DESKTOP_SHEET, barSignatures, buildSheet, locate, type SheetOptions } from "./barLayout";
+import { DESKTOP_SHEET, barSignatures, buildSheet, hitTest, locate, type SheetOptions } from "./barLayout";
 
 const ev = (time: number, string = 0, fret = 0): TabEvent => ({ time, duration: 0.1, notes: [{ string, fret }] });
 
@@ -110,5 +110,28 @@ describe("barSignatures", () => {
   it("describes bars by beat position, string and fret", () => {
     const sheet = buildSheet([ev(0, 1, 3), ev(1, 2, 5)], measures(1), beats(1), 4, 2, opts());
     expect(barSignatures(sheet, [ev(0, 1, 3), ev(1, 2, 5)])[0]).toEqual(["0@1:3", "2@2:5"]);
+  });
+});
+
+
+describe("hitTest", () => {
+  const events = [ev(0.5), ev(1.0), ev(2.5)];
+  const sheet = buildSheet(events, measures(2), beats(2), 4, 4, { ...opts(900), justify: false });
+
+  it("snaps to an existing note column nearby", () => {
+    const bar = sheet.bars[0];
+    const col = bar.events[1];
+    const hit = hitTest(sheet, 0, bar.x + col.x + 5)!;
+    expect(hit.eventIndex).toBe(1);
+    expect(hit.time).toBe(1.0);
+  });
+
+  it("is the inverse of locate between columns", () => {
+    for (const t of [0.7, 1.4, 2.2, 3.1]) {
+      const pos = locate(sheet, t);
+      const hit = hitTest(sheet, pos.row, pos.x)!;
+      if (hit.eventIndex === null) expect(hit.time).toBeCloseTo(t, 3);
+      expect(hit.bar).toBe(pos.bar);
+    }
   });
 });

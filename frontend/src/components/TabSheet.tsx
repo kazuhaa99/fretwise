@@ -1,7 +1,8 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { TabData, TabEvent, TabNote } from "../types";
 import type { PlaybackState } from "../lib/playback";
-import { DESKTOP_SHEET, PHONE_SHEET, barSignatures, buildSheet, locate, type SheetLayout, type SheetRow } from "../lib/barLayout";
+import { DESKTOP_SHEET, PHONE_SHEET, barSignatures, buildSheet, hitTest, locate, type SheetLayout, type SheetRow } from "../lib/barLayout";
+import { snapToGrid, type NoteRef } from "../lib/tabEdit";
 import { detectSections } from "../lib/sections";
 import { prefersReducedMotion } from "../theme";
 import { bendArrowLabel } from "./tabNotation";
@@ -30,9 +31,14 @@ interface Props {
   onCurrentBarChange: (bar: number) => void;
   /** Bottom space covered by the floating player (for auto-scroll). */
   bottomInset: number;
+  /** Edit mode: clicks select notes / add notes instead of seeking. */
+  editing?: boolean;
+  selectedNote?: NoteRef | null;
+  onSelectNote?: (ref: NoteRef) => void;
+  onAddNote?: (time: number, string: number) => void;
 }
 
-interface NoteRef {
+interface PlacedNote {
   event: TabEvent;
   note: TabNote;
   x: number;
@@ -56,7 +62,11 @@ const Row = memo(function Row({
   onBarPointerEnter,
   onBarClick,
   onNoteClick,
+  editing,
+  selectedNote,
 }: {
+  editing: boolean;
+  selectedNote: NoteRef | null;
   row: SheetRow;
   layout: SheetLayout;
   events: TabEvent[];
@@ -67,8 +77,8 @@ const Row = memo(function Row({
   loopActive: boolean;
   onBarPointerDown: (bar: number, e: React.PointerEvent) => void;
   onBarPointerEnter: (bar: number) => void;
-  onBarClick: (bar: number, e: React.MouseEvent) => void;
-  onNoteClick: (time: number) => void;
+  onBarClick: (row: number, bar: number, e: React.MouseEvent<SVGRectElement>) => void;
+  onNoteClick: (eventIndex: number, noteIndex: number) => void;
 }) {
   const staffTop = TOP_BAND;
   const staffBottom = stringY(0, stringCount);
@@ -77,13 +87,13 @@ const Row = memo(function Row({
   const isFirstRow = row.index === 0;
 
   // Notes in this row, for technique connectors (previous note on a string).
-  const placed: NoteRef[] = [];
+  const placed: PlacedNote[] = [];
   for (const bar of row.bars) {
     for (const e of bar.events) {
       for (const note of events[e.index].notes) placed.push({ event: events[e.index], note, x: bar.x + e.x });
     }
   }
-  const prevOnString = new Map<number, NoteRef>();
+  const prevOnString = new Map<number, PlacedNote>();
   const connectors: React.ReactNode[] = [];
   const marks: React.ReactNode[] = [];
   const palmRuns: { from: number; to: number }[] = [];
@@ -168,8 +178,8 @@ const Row = memo(function Row({
             width={b.width}
             height={staffBottom - staffTop + 16 + BOTTOM_BAND - 8}
             fill="transparent"
-            style={{ cursor: "pointer" }}
-            onClick={(e) => onBarClick(b.index, e)}
+            style={{ cursor: editing ? "crosshair" : "pointer" }}
+            onClick={(e) => onBarClick(row.index, b.index, e)}
             data-bar={b.index}
           />
           <rect
@@ -255,9 +265,23 @@ const Row = memo(function Row({
               const y = stringY(note.string, stringCount);
               const label = String(note.fret);
               const w = label.length > 1 ? 22 : 16;
+              const selected = selectedNote !== null && selectedNote.event === e.index && selectedNote.note === k;
               return (
-                <g key={`${e.index}-${k}`} onClick={() => onNoteClick(events[e.index].time)} style={{ cursor: "pointer" }}>
-                  <rect x={x - w / 2} y={y - 9} width={w} height={18} fill={b.index === currentBar ? "var(--accent-soft)" : "var(--surface)"} />
+                <g
+                  key={`${e.index}-${k}`}
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    onNoteClick(e.index, k);
+                  }}
+                  style={{ cursor: "pointer" }}
+                  data-note={`${e.index}:${k}`}
+                  aria-selected={selected || undefined}
+                >
+                  {selected ? (
+                    <rect x={x - w / 2 - 3} y={y - 11} width={w + 6} height={22} rx={5} fill="var(--accent-soft)" stroke="var(--accent-strong)" strokeWidth={2} />
+                  ) : (
+                    <rect x={x - w / 2} y={y - 9} width={w} height={18} fill={b.index === currentBar ? "var(--accent-soft)" : "var(--surface)"} />
+                  )}
                   <text x={x} y={y + 5} fill="var(--text)">
                     {label}
                   </text>
@@ -299,6 +323,10 @@ export default function TabSheet({
   follow,
   onCurrentBarChange,
   bottomInset,
+  editing = false,
+  selectedNote = null,
+  onSelectNote,
+  onAddNote,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const cursorRef = useRef<HTMLDivElement>(null);
@@ -425,7 +453,24 @@ export default function TabSheet({
     [onSelect],
   );
   const onBarClick = useCallback(
-    (bar: number, e: React.MouseEvent) => {
+    (rowIndex: number, bar: number, e: React.MouseEvent<SVGRectElement>) => {
+      if (editing) {
+        // Add a note where the click landed: nearest string line, and either
+        // the note column under the pointer or the nearest sixteenth.
+        const svg = e.currentTarget.ownerSVGElement;
+        if (!svg || !onAddNote) return;
+        const rect = svg.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        const fromTop = Math.round((y - TOP_BAND) / STRING_GAP);
+        const string = stringCount - 1 - fromTop;
+        if (string < 0 || string >= stringCount) return;
+        const hit = hitTest(layout, rowIndex, x);
+        if (!hit) return;
+        const time = hit.eventIndex !== null ? hit.time : snapToGrid(hit.time, tab.beatTimes ?? []);
+        onAddNote(time, string);
+        return;
+      }
       if (e.shiftKey) {
         const anchor = selection ? selection.start : (currentBar ?? bar);
         onSelect({ start: Math.min(anchor, bar), end: Math.max(anchor, bar) });
@@ -433,9 +478,15 @@ export default function TabSheet({
       }
       onSeek(Math.max(0, layout.bars[bar].start));
     },
-    [layout, onSeek, onSelect, selection, currentBar],
+    [layout, onSeek, onSelect, selection, currentBar, editing, onAddNote, stringCount, tab.beatTimes],
   );
-  const onNoteClick = useCallback((time: number) => onSeek(Math.max(0, time)), [onSeek]);
+  const onNoteClick = useCallback(
+    (eventIndex: number, noteIndex: number) => {
+      if (editing && onSelectNote) onSelectNote({ event: eventIndex, note: noteIndex });
+      else onSeek(Math.max(0, events[eventIndex].time));
+    },
+    [editing, onSelectNote, onSeek, events],
+  );
 
   const backToCursor = () => {
     setDetached(false);
@@ -474,6 +525,10 @@ export default function TabSheet({
                 onBarPointerEnter={onBarPointerEnter}
                 onBarClick={onBarClick}
                 onNoteClick={onNoteClick}
+                editing={editing}
+                selectedNote={
+                  selectedNote && row.bars.some((b) => b.events.some((e) => e.index === selectedNote.event)) ? selectedNote : null
+                }
               />
             </div>
           ))}
@@ -481,7 +536,7 @@ export default function TabSheet({
           ref={cursorRef}
           aria-hidden="true"
           data-testid="cursor"
-          className="pointer-events-none absolute top-0 left-0 w-[2.5px] rounded-full bg-accent opacity-60"
+          className={`pointer-events-none absolute top-0 left-0 w-[2.5px] rounded-full bg-accent ${editing ? "opacity-25" : "opacity-60"}`}
           style={{ height: rowHeight - TOP_BAND - BOTTOM_BAND + 20, willChange: "transform" }}
         />
       </div>

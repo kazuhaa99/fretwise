@@ -287,3 +287,120 @@ describe("result screen", () => {
     expect(screen.queryByRole("region", { name: "Плеер" })).not.toBeInTheDocument();
   });
 });
+
+describe("editing the tab", () => {
+  // jsdom has no layout: give the sheet a width so rows render.
+  const realClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientWidth");
+  beforeEach(() => {
+    Object.defineProperty(HTMLElement.prototype, "clientWidth", { configurable: true, get: () => 900 });
+  });
+  afterEach(() => {
+    if (realClientWidth) Object.defineProperty(HTMLElement.prototype, "clientWidth", realClientWidth);
+  });
+
+  function serve(onPut?: (body: { baseRevision: number; tracks: JobResult["tab"]["tracks"] }) => Response) {
+    let revision = 0;
+    const puts: { baseRevision: number; tracks: JobResult["tab"]["tracks"] }[] = [];
+    const fetchMock = mockFetch((url, init) => {
+      if (url.endsWith("/tab") && init?.method === "PUT") {
+        const body = JSON.parse(String(init.body));
+        puts.push(body);
+        if (onPut) return onPut(body);
+        revision += 1;
+        return json({ ...result, revision, edited: true, tab: { ...result.tab, tracks: body.tracks } });
+      }
+      if (url.endsWith("/edits") && init?.method === "DELETE") {
+        revision += 1;
+        return json({ ...result, revision, edited: false });
+      }
+      if (url.endsWith("/result")) return json(result);
+      return json(status("done", { progress: 1 }));
+    });
+    return { puts, fetchMock };
+  }
+
+  async function openEditor() {
+    setUrl(`?job=${JOB_ID}`);
+    render(<App />);
+    await screen.findByRole("heading", { name: "Группа крови" });
+    fireEvent.click(screen.getByRole("button", { name: "Править" }));
+    expect(await screen.findByRole("toolbar", { name: "Правка табулатуры" })).toBeInTheDocument();
+  }
+
+  const fretInput = () => screen.getByRole("spinbutton", { name: "Лад" }) as HTMLInputElement;
+
+  it("selects a note, types a fret, autosaves, and undoes / redoes with the keyboard", async () => {
+    const { puts } = serve();
+    await openEditor();
+
+    const note = document.querySelector('[data-note="0:0"]')!;
+    fireEvent.click(note);
+    expect(fretInput().value).toBe("3");
+
+    fireEvent.keyDown(window, { code: "Digit9", key: "9" });
+    expect(fretInput().value).toBe("9");
+    await waitFor(() => expect(puts).toHaveLength(1), { timeout: 2000 });
+    expect(puts[0].baseRevision).toBe(0);
+    expect(puts[0].tracks[0].events[0].notes[0].fret).toBe(9);
+    expect(await screen.findByText(/Сохранено/)).toBeInTheDocument();
+    expect(screen.getByText("изменено")).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { code: "KeyZ", key: "z", ctrlKey: true });
+    expect(fretInput().value).toBe("3");
+    await waitFor(() => expect(puts).toHaveLength(2), { timeout: 2000 });
+    expect(puts[1].baseRevision).toBe(1);
+    expect(puts[1].tracks[0].events[0].notes[0].fret).toBe(3);
+
+    fireEvent.keyDown(window, { code: "KeyZ", key: "z", ctrlKey: true, shiftKey: true });
+    expect(fretInput().value).toBe("9");
+    await waitFor(() => expect(puts).toHaveLength(3), { timeout: 2000 });
+  });
+
+  it("types two-digit frets as one edit and one save", async () => {
+    const { puts } = serve();
+    await openEditor();
+    fireEvent.click(document.querySelector('[data-note="0:0"]')!);
+    fireEvent.keyDown(window, { code: "Digit1", key: "1" });
+    fireEvent.keyDown(window, { code: "Digit2", key: "2" });
+    expect(fretInput().value).toBe("12");
+    await waitFor(() => expect(puts).toHaveLength(1), { timeout: 2000 });
+    expect(puts[0].tracks[0].events[0].notes[0].fret).toBe(12);
+  });
+
+  it("deletes the selected note with Delete", async () => {
+    const { puts } = serve();
+    await openEditor();
+    fireEvent.click(document.querySelector('[data-note="0:0"]')!);
+    fireEvent.keyDown(window, { code: "Delete", key: "Delete" });
+    await waitFor(() => expect(puts).toHaveLength(1), { timeout: 2000 });
+    expect(puts[0].tracks[0].events).toHaveLength(0);
+  });
+
+  it("stops autosaving after a revision conflict and says why", async () => {
+    const { puts } = serve(() => json({ detail: "Табулатуру уже изменили в другой вкладке. Обнови страницу, чтобы увидеть последние правки." }, 409));
+    await openEditor();
+    fireEvent.click(document.querySelector('[data-note="0:0"]')!);
+    fireEvent.keyDown(window, { code: "Digit5", key: "5" });
+    expect(await screen.findByText(/в другой вкладке/, {}, { timeout: 2000 })).toBeInTheDocument();
+    fireEvent.keyDown(window, { code: "Digit7", key: "7" });
+    await new Promise((r) => setTimeout(r, 800));
+    expect(puts).toHaveLength(1);
+  });
+
+  it("reverts all edits after an inline confirmation", async () => {
+    const { puts, fetchMock } = serve();
+    await openEditor();
+    fireEvent.click(document.querySelector('[data-note="0:0"]')!);
+    fireEvent.keyDown(window, { code: "Digit5", key: "5" });
+    await waitFor(() => expect(puts).toHaveLength(1), { timeout: 2000 });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Сбросить все правки" }));
+    fireEvent.click(screen.getByRole("button", { name: "Сбросить" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(`/api/jobs/${JOB_ID}/edits`, expect.objectContaining({ method: "DELETE" })),
+    );
+    await waitFor(() => expect(screen.queryByText("изменено")).not.toBeInTheDocument());
+    fireEvent.click(document.querySelector('[data-note="0:0"]')!);
+    expect(fretInput().value).toBe("3");
+  });
+});

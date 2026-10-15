@@ -240,11 +240,8 @@ export interface SheetPosition {
 /** Where the playhead goes at time `t`: linear between the bar line, the
  * bar's note columns and the next bar line — so it reaches every note
  * exactly at its onset and never moves backwards. */
-export function locate(layout: SheetLayout, t: number): SheetPosition {
-  const { bars } = layout;
-  if (!bars.length) return { bar: 0, row: 0, x: 0 };
-  const bar = bars[spanIndexAt(bars, t)];
-
+/** Piecewise-linear (time, x) anchors of one bar: bar line, note columns, next bar line. */
+function barAnchors(bar: PlacedBar): { t: number; x: number }[] {
   const anchors: { t: number; x: number }[] = [{ t: bar.start, x: bar.contentX }];
   for (const e of bar.events) {
     const last = anchors[anchors.length - 1];
@@ -255,6 +252,14 @@ export function locate(layout: SheetLayout, t: number): SheetPosition {
   }
   const tail = anchors[anchors.length - 1];
   if (bar.end > tail.t) anchors.push({ t: bar.end, x: Math.max(bar.width, tail.x) });
+  return anchors;
+}
+
+export function locate(layout: SheetLayout, t: number): SheetPosition {
+  const { bars } = layout;
+  if (!bars.length) return { bar: 0, row: 0, x: 0 };
+  const bar = bars[spanIndexAt(bars, t)];
+  const anchors = barAnchors(bar);
 
   let x: number;
   if (t <= anchors[0].t) x = anchors[0].x;
@@ -267,6 +272,47 @@ export function locate(layout: SheetLayout, t: number): SheetPosition {
     x = a.x + ((t - a.t) / (b.t - a.t)) * (b.x - a.x);
   }
   return { bar: bar.index, row: bar.row, x: bar.x + Math.min(x, bar.width) };
+}
+
+export interface SheetHit {
+  bar: number;
+  /** Time under x (inverse of `locate`). */
+  time: number;
+  /** Index into the track's events when x is on an existing note column. */
+  eventIndex: number | null;
+}
+
+const COLUMN_HIT_RADIUS = 12;
+
+/** What's under x in a row — for adding a note where the user clicked. A
+ * click close to an existing column joins that chord. */
+export function hitTest(layout: SheetLayout, rowIndex: number, x: number): SheetHit | null {
+  const row = layout.rows[rowIndex];
+  if (!row || !row.bars.length) return null;
+  let bar = row.bars[0];
+  for (const b of row.bars) if (b.x <= x) bar = b;
+  const local = x - bar.x;
+
+  let nearest: PlacedEvent | null = null;
+  for (const e of bar.events) {
+    if (Math.abs(e.x - local) <= COLUMN_HIT_RADIUS && (!nearest || Math.abs(e.x - local) < Math.abs(nearest.x - local))) {
+      nearest = e;
+    }
+  }
+  if (nearest) return { bar: bar.index, time: nearest.time, eventIndex: nearest.index };
+
+  const anchors = barAnchors(bar);
+  let time: number;
+  if (local <= anchors[0].x) time = anchors[0].t;
+  else if (local >= anchors[anchors.length - 1].x) time = anchors[anchors.length - 1].t;
+  else {
+    let k = 0;
+    while (anchors[k + 1].x <= local) k++;
+    const a = anchors[k];
+    const b = anchors[k + 1];
+    time = b.x > a.x ? a.t + ((local - a.x) / (b.x - a.x)) * (b.t - a.t) : a.t;
+  }
+  return { bar: bar.index, time: Math.max(bar.start, Math.min(time, bar.end - 1e-3)), eventIndex: null };
 }
 
 /** Signature of each bar's content for section detection: which strings and

@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { EDIT_KEYS } from "../lib/editKeys";
 import { HOTKEYS } from "../lib/hotkeys";
 import { CloseIcon } from "./icons";
 import { IconButton, Kbd } from "./ui";
@@ -32,7 +33,7 @@ export default function ShortcutsDialog({ open, onClose }: { open: boolean; onCl
         role="dialog"
         aria-modal="true"
         aria-labelledby="shortcuts-title"
-        className="w-full max-w-md rounded-lg border border-line bg-raised p-5 shadow-float"
+        className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-lg border border-line bg-raised p-5 shadow-float"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-3 flex items-center justify-between">
@@ -55,6 +56,23 @@ export default function ShortcutsDialog({ open, onClose }: { open: boolean; onCl
                   </span>
                 </td>
                 <td className="py-2.5">{h.label}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <h3 className="mt-4 mb-1 text-sm font-semibold text-muted">В режиме правки</h3>
+        <table className="w-full text-[15px]">
+          <tbody>
+            {EDIT_KEYS.map((h) => (
+              <tr key={h.label} className="border-b border-line last:border-0">
+                <td className="w-28 py-2 pr-3 align-top">
+                  <span className="inline-flex flex-wrap gap-1">
+                    {h.keys.map((k) => (
+                      <Kbd key={k}>{k}</Kbd>
+                    ))}
+                  </span>
+                </td>
+                <td className="py-2">{h.label}</td>
               </tr>
             ))}
           </tbody>
