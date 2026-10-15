@@ -1,4 +1,4 @@
-import type { JobResult, JobStatus, TabSettings, TabTrack } from "../types";
+import type { JobResult, JobStatus, JobSummary, TabSettings, TabTrack } from "../types";
 
 const BASE = "/api";
 
@@ -109,6 +109,11 @@ export async function uploadJob(file: File, settings: TabSettings): Promise<JobS
   form.append("file", file);
   form.append("settings", JSON.stringify(settings));
   return request<JobStatus>(`${BASE}/jobs`, { method: "POST", body: form });
+}
+
+/** Job history, newest first. */
+export async function listJobs(): Promise<JobSummary[]> {
+  return request<JobSummary[]>(`${BASE}/jobs`);
 }
 
 export async function getJobStatus(jobId: string): Promise<JobStatus> {

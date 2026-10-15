@@ -23,6 +23,7 @@ needs, though:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import shutil
@@ -45,6 +46,8 @@ ACCEPTED_EXTENSIONS = {
 }
 
 UPLOAD_FILENAME_STEM = "upload"
+META_FILENAME = "job.json"
+INTERRUPTED_MESSAGE = "Обработка прервалась: сервер был перезапущен. Загрузи файл ещё раз."
 EXTRACTED_AUDIO_FILENAME = "audio.wav"
 GUITAR_STEM_FILENAME = "guitar.wav"
 TAB_FILENAME = "tab.gp5"
@@ -186,7 +189,10 @@ class Job:
     work_dir: Path
     status: schemas.JobStatus
     result: Optional[schemas.JobResult] = None
-    finished_at: Optional[float] = None  # `time.monotonic()` when it reached a terminal stage
+    # Wall-clock (`time.time()`) timestamps: they are persisted in job.json and
+    # must still mean something after a restart, which monotonic time doesn't.
+    created_at: float = field(default_factory=time.time)
+    finished_at: Optional[float] = None
     duration_seconds: Optional[float] = None  # of the decoded audio, once known
     cancel_requested: bool = False
     revision: int = 0  # of the tab; bumped by every saved edit
@@ -246,9 +252,46 @@ class Job:
         """
         self.status = status
         if status.stage in _TERMINAL_STAGES and self.finished_at is None:
-            self.finished_at = time.monotonic()
+            self.finished_at = time.time()
+            self.save_meta()
         for queue in list(self._subscribers):
             queue.put_nowait(status)
+
+    @property
+    def meta_path(self) -> Path:
+        return self.work_dir / META_FILENAME
+
+    def save_meta(self) -> None:
+        """Persist what's needed to bring this job back after a restart (the
+        tab itself lives in tab.original.json / tab.json next to it)."""
+        if not self.work_dir.exists():
+            return
+        meta = {
+            "id": self.id,
+            "title": self.title,
+            "settings": self.settings.model_dump(by_alias=True),
+            "status": self.status.model_dump(by_alias=True),
+            "createdAt": self.created_at,
+            "finishedAt": self.finished_at,
+            "revision": self.revision,
+            "uploadSuffix": self.upload_path.suffix,
+            "durationSeconds": self.duration_seconds,
+        }
+        tmp = self.meta_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, self.meta_path)
+
+    def summary(self) -> schemas.JobSummary:
+        return schemas.JobSummary(
+            id=self.id,
+            title=self.title,
+            stage=self.status.stage,
+            created_at=self.created_at,
+            finished_at=self.finished_at,
+            duration_seconds=self.duration_seconds,
+            edited=bool(self.result and self.result.edited),
+            error=self.status.error,
+        )
 
     def subscribe(self) -> "asyncio.Queue[schemas.JobStatus]":
         queue: "asyncio.Queue[schemas.JobStatus]" = asyncio.Queue()
@@ -308,10 +351,35 @@ class JobManager:
     # -- lifecycle -----------------------------------------------------------
 
     async def start(self) -> None:
-        """Called from the app's lifespan: clean up after the previous run and
-        start the periodic expiry sweep."""
+        """Called from the app's lifespan: bring back the previous run's jobs,
+        clean up what can't be brought back, and start the expiry sweep."""
+        self.restore_from_disk()
         self.sweep_orphaned_dirs()
+        self.purge_expired()
         self._purge_task = asyncio.create_task(self._purge_periodically())
+
+    def restore_from_disk(self) -> list[str]:
+        """Reload jobs persisted by a previous run (history survives restarts).
+
+        Finished jobs come back with their tab — edits included — and can be
+        played, edited and downloaded as before. A job the restart caught
+        mid-pipeline can't be resumed (its worker thread is gone), so it comes
+        back as an error that says exactly that; its partial files are dropped.
+        Folders without readable metadata are left for `sweep_orphaned_dirs`.
+        """
+        restored = []
+        for entry in sorted(self._jobs_root.iterdir()):
+            if not (entry.is_dir() and _JOB_DIR_RE.match(entry.name)) or entry.name in self._jobs:
+                continue
+            try:
+                job = _job_from_disk(entry)
+            except Exception:  # noqa: BLE001 - unreadable metadata: treat as an orphan
+                continue
+            if job is None:
+                continue
+            self._jobs[job.id] = job
+            restored.append(job.id)
+        return restored
 
     async def stop(self) -> None:
         if self._purge_task is not None:
@@ -345,7 +413,7 @@ class JobManager:
     def purge_expired(self, now: Optional[float] = None) -> list[str]:
         """Delete finished jobs older than the TTL. Queued/running jobs are
         never touched, however long they take."""
-        now = time.monotonic() if now is None else now
+        now = time.time() if now is None else now
         expired = [
             job.id for job in self._jobs.values()
             if job.finished_at is not None and now - job.finished_at >= self._job_ttl_seconds
@@ -358,6 +426,10 @@ class JobManager:
 
     def get(self, job_id: str) -> Optional[Job]:
         return self._jobs.get(job_id)
+
+    def list(self) -> list[schemas.JobSummary]:
+        """Every known job, newest first — the history list."""
+        return [job.summary() for job in sorted(self._jobs.values(), key=lambda j: j.created_at, reverse=True)]
 
     async def submit(
         self,
@@ -410,6 +482,7 @@ class JobManager:
             status=schemas.JobStatus(id=job_id, stage="queued", progress=0.0, message="В очереди на обработку"),
         )
         self._jobs[job_id] = job
+        job.save_meta()
         task = asyncio.create_task(self._run(job))
         self._tasks.add(task)
         self._job_tasks[job_id] = task
@@ -483,6 +556,7 @@ class JobManager:
         edits.write_gp5(tab, job.tab_path, title=job.title)
         job.revision += 1
         job.result = job.result.model_copy(update={"tab": tab, "revision": job.revision, "edited": True})
+        job.save_meta()
         return job.result
 
     def revert_edits(self, job_id: str) -> schemas.JobResult:
@@ -494,6 +568,7 @@ class JobManager:
         job.edited_tab_path.unlink(missing_ok=True)
         job.revision += 1
         job.result = job.result.model_copy(update={"tab": tab, "revision": job.revision, "edited": False})
+        job.save_meta()
         return job.result
 
     def delete(self, job_id: str) -> None:
@@ -665,10 +740,16 @@ def _build_result(
             for index, track_events in enumerate(tracks)
         ],
     )
+    return _result(job, status=status, tab=tab)
+
+
+def _result(job: Job, *, status: schemas.JobStatus, tab: schemas.TabData, edited: bool = False) -> schemas.JobResult:
     return schemas.JobResult(
         job=status,
         title=job.title,
         tab=tab,
+        revision=job.revision,
+        edited=edited,
         original_audio_url=f"/api/jobs/{job.id}/audio/original",
         guitar_audio_url=f"/api/jobs/{job.id}/audio/guitar",
         gp5_url=f"/api/jobs/{job.id}/export.gp5",
@@ -721,3 +802,46 @@ async def _run_with_estimated_progress(job: Job, *, stage: schemas.JobStage, mes
 
     job.publish(stage=stage, progress=1.0, message=message)
     return result
+
+
+def _job_from_disk(work_dir: Path) -> Optional[Job]:
+    """Rebuild a `Job` from its job.json (see `Job.save_meta`), or None if the
+    folder has no metadata."""
+    meta_path = work_dir / META_FILENAME
+    if not meta_path.exists():
+        return None
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    status = schemas.JobStatus.model_validate(meta["status"])
+    job = Job(
+        id=meta["id"],
+        title=meta.get("title") or FALLBACK_TITLE,
+        settings=schemas.TabSettings.model_validate(meta["settings"]),
+        upload_path=work_dir / f"{UPLOAD_FILENAME_STEM}{meta.get('uploadSuffix', '')}",
+        work_dir=work_dir,
+        status=status,
+        created_at=float(meta.get("createdAt") or time.time()),
+        finished_at=meta.get("finishedAt"),
+        duration_seconds=meta.get("durationSeconds"),
+        revision=int(meta.get("revision") or 0),
+    )
+
+    if status.stage == "done" and job.original_tab_path.exists():
+        edited = job.edited_tab_path.exists()
+        tab = edits.read_json(job.edited_tab_path if edited else job.original_tab_path)
+        job.result = _result(job, status=status, tab=tab, edited=edited)
+    elif status.stage not in _TERMINAL_STAGES or status.stage == "done":
+        # Caught mid-pipeline by the restart (or a "done" job missing its tab):
+        # nothing to resume. Keep the record so the user learns what happened,
+        # drop the partial files.
+        for child in work_dir.iterdir():
+            if child.name != META_FILENAME:
+                if child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+                else:
+                    child.unlink(missing_ok=True)
+        job.status = schemas.JobStatus(
+            id=job.id, stage="error", progress=status.progress, message="Не получилось обработать файл", error=INTERRUPTED_MESSAGE
+        )
+        job.finished_at = time.time()
+        job.save_meta()
+    return job

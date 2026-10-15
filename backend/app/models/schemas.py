@@ -158,3 +158,18 @@ class TabEditRequest(BaseModel):
 
     base_revision: int = Field(alias="baseRevision")
     tracks: list[TabTrack]
+
+
+class JobSummary(BaseModel):
+    """One entry of GET /api/jobs — the job history."""
+
+    model_config = _camel_config
+
+    id: str
+    title: str
+    stage: JobStage
+    created_at: float = Field(alias="createdAt")  # Unix seconds
+    finished_at: Optional[float] = Field(None, alias="finishedAt")
+    duration_seconds: Optional[float] = Field(None, alias="durationSeconds")
+    edited: bool = False
+    error: Optional[str] = None

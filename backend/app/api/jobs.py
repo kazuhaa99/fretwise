@@ -1,4 +1,4 @@
-"""GET /api/jobs/{id} — job status, /events — live progress via SSE,
+"""GET /api/jobs — job history, GET /api/jobs/{id} — job status, /events — live progress via SSE,
 POST /api/jobs/{id}/cancel — stop a job, and DELETE /api/jobs/{id} — drop a
 finished job and its files."""
 
@@ -16,6 +16,11 @@ from ..models import schemas
 
 def get_router(manager: JobManager) -> APIRouter:
     router = APIRouter(prefix="/api/jobs", tags=["jobs"])
+
+    @router.get("", response_model=list[schemas.JobSummary])
+    async def list_jobs() -> list[schemas.JobSummary]:
+        """Job history, newest first (persists across restarts)."""
+        return manager.list()
 
     @router.get("/{job_id}", response_model=schemas.JobStatus)
     async def get_status(job_id: str) -> schemas.JobStatus:

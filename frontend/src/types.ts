@@ -75,3 +75,15 @@ export interface JobResult {
   txtUrl: string; // plain-text (ASCII) tab
   midiUrl: string; // Standard MIDI File
 }
+
+/** One entry of GET /api/jobs — the job history (persists across restarts). */
+export interface JobSummary {
+  id: string;
+  title: string;
+  stage: JobStage;
+  createdAt: number; // Unix seconds
+  finishedAt?: number | null;
+  durationSeconds?: number | null;
+  edited: boolean;
+  error?: string | null;
+}

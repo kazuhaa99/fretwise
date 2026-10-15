@@ -462,3 +462,83 @@ def test_text_and_midi_exports_follow_edits(client):
     edited_text = client.get(result["txtUrl"]).text
     assert "21" in edited_text and edited_text != text.text
     assert client.get(result["midiUrl"]).content != midi.content
+
+
+def test_jobs_survive_a_restart_with_their_edits(tmp_path):
+    from sse_starlette.sse import AppStatus
+
+    jobs_root = tmp_path / "persist"
+    AppStatus.should_exit_event = None
+    with TestClient(create_app(jobs_root=jobs_root)) as first:
+        job_id = _upload_named(first, "Песня.wav")
+        assert _wait_for_terminal_stage(first, job_id)["stage"] == "done"
+        result = first.get(f"/api/jobs/{job_id}/result").json()
+        tracks = copy.deepcopy(result["tab"]["tracks"])
+        tracks[0]["events"] = tracks[0]["events"][:2]
+        assert first.put(f"/api/jobs/{job_id}/tab", json={"baseRevision": 0, "tracks": tracks}).status_code == 200
+
+    # A job the restart catches mid-pipeline, and a folder with no metadata.
+    interrupted = jobs_root / ("b" * 32)
+    interrupted.mkdir()
+    (interrupted / "upload.wav").write_bytes(b"x")
+    (interrupted / "job.json").write_text(json.dumps({
+        "id": "b" * 32, "title": "Недоделанная", "settings": SETTINGS,
+        "status": {"id": "b" * 32, "stage": "separating", "progress": 0.4, "message": "..."},
+        "createdAt": time.time() - 60, "finishedAt": None, "revision": 0, "uploadSuffix": ".wav",
+    }), encoding="utf-8")
+    orphan = jobs_root / ("c" * 32)
+    orphan.mkdir()
+
+    AppStatus.should_exit_event = None
+    with TestClient(create_app(jobs_root=jobs_root)) as second:
+        restored = second.get(f"/api/jobs/{job_id}/result")
+        assert restored.status_code == 200
+        body = restored.json()
+        assert body["title"] == "Песня"
+        assert body["edited"] is True and body["revision"] == 1
+        assert len(body["tab"]["tracks"][0]["events"]) == 2
+        assert second.get(f"/api/jobs/{job_id}/export.gp5").status_code == 200
+        # Editing continues from the persisted revision.
+        assert second.put(f"/api/jobs/{job_id}/tab", json={"baseRevision": 1, "tracks": tracks}).status_code == 200
+
+        status = second.get(f"/api/jobs/{'b' * 32}").json()
+        assert status["stage"] == "error"
+        assert "перезапущен" in status["error"]
+        assert not (interrupted / "upload.wav").exists()
+        assert not orphan.exists()
+
+        history = second.get("/api/jobs").json()
+        assert [h["id"] for h in history] == [job_id, "b" * 32]  # newest first
+        assert history[0] == {
+            "id": job_id, "title": "Песня", "stage": "done", "createdAt": pytest.approx(history[0]["createdAt"]),
+            "finishedAt": pytest.approx(history[0]["finishedAt"]), "durationSeconds": pytest.approx(history[0]["durationSeconds"]),
+            "edited": True, "error": None,
+        }
+        assert history[0]["finishedAt"] >= history[0]["createdAt"]
+
+        # Deleting from the history removes it for good.
+        assert second.delete(f"/api/jobs/{job_id}").status_code == 204
+
+    AppStatus.should_exit_event = None
+    with TestClient(create_app(jobs_root=jobs_root)) as third:
+        assert third.get(f"/api/jobs/{job_id}").status_code == 404
+
+
+def test_expired_jobs_are_dropped_on_restart(tmp_path):
+    from sse_starlette.sse import AppStatus
+
+    jobs_root = tmp_path / "ttl"
+    AppStatus.should_exit_event = None
+    with TestClient(create_app(jobs_root=jobs_root, job_ttl_hours=1.0)) as first:
+        job_id = _upload(first)
+        assert _wait_for_terminal_stage(first, job_id)["stage"] == "done"
+
+    meta_path = jobs_root / job_id / "job.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["finishedAt"] -= 2 * 3600  # finished two hours ago, by the wall clock
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+    AppStatus.should_exit_event = None
+    with TestClient(create_app(jobs_root=jobs_root, job_ttl_hours=1.0)) as second:
+        assert second.get(f"/api/jobs/{job_id}").status_code == 404
+        assert not (jobs_root / job_id).exists()
