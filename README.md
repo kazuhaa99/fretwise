@@ -1,120 +1,124 @@
 # Fretwise
 
-Локальное веб-приложение, которое превращает аудио или видео в табулатуру для
-гитары: выделяет партию гитары из микса, распознаёт ноты по высоте звука и
-собирает табы, которые **реально сыграть руками** — без растяжек вроде
-1-3-15-17-18 в одном аккорде. Результат можно сразу проиграть в браузере с
-синхронизированным курсором по партитуре или скачать как `.gp5` для Guitar Pro.
+Fretwise is a local web app that turns audio or video into guitar tablature. It isolates the guitar part, detects notes and arranges them into tabs **a human can actually play**, so you never get impossible stretches like `1-3-15-17-18` in one chord.
 
-Всё работает локально: файлы и модели не покидают машину пользователя.
+![Fretwise upload screen](docs/screenshot.png)
 
-## Как это устроено
+The resulting tab plays back in the browser with a cursor synced to the audio, and you can export it to `.gp5` for Guitar Pro. Everything runs locally: your files and the models stay on your machine.
 
-1. **Извлечение звука** — `ffmpeg` достаёт аудиодорожку из любого формата (видео тоже).
-2. **Разделение дорожек** — [Demucs](https://github.com/facebookresearch/demucs) (`htdemucs_6s`) выделяет чистую партию гитары из микса.
-3. **Распознавание нот** — [Basic Pitch](https://github.com/spotify/basic-pitch) определяет высоту, начало и длительность нот по изолированной партии.
-4. **Подбор аппликатуры** — собственный алгоритм (`tab_builder.py`) раскладывает ноты по грифу: минимизирует переходы по грифу, не допускает аккордов с физически невозможной растяжкой и одновременных нот на одной струне.
-5. **Экспорт** — [PyGuitarPro](https://github.com/Perlence/PyGuitarPro) собирает результат в `.gp5`.
-6. **Интерфейс** — React-приложение показывает прогресс в реальном времени (SSE), проигрывает изолированную/оригинальную дорожку и рисует табулатуру с курсором, синхронизированным с воспроизведением.
+## Features
 
-## Требования
+- Upload any audio **or video** file (MP3, WAV, FLAC, M4A, MP4, MOV, MKV)
+- Guitar stem separation with **Demucs** (`htdemucs_6s`)
+- Note transcription (pitch, onset, duration) with Spotify's **Basic Pitch**
+- **Playability-aware fingering**: a custom Viterbi-style dynamic program over the fretboard. It discards voicings outside the hand span or with two notes on one string, and minimises position shifts
+- Tunable settings: guitar tuning (Standard, Drop D, Eb, Open D), capo, max fret span, position-shift weight
+- Real-time processing progress over **Server-Sent Events**
+- Tab viewer with playback of the isolated stem or the original mix and a synced cursor
+- **Export to Guitar Pro** (`.gp5`) via PyGuitarPro
+- One-command **Docker Compose** setup
 
-- **Python 3.11+** (разработано и проверено на 3.11.9)
-- **Node.js 20+** и npm
-- Отдельно ставить `ffmpeg` **не нужно** — бэкенд использует встроенные через
-  `imageio-ffmpeg`/`static-ffmpeg` бинарники автоматически.
+## How it works
 
-## Установка
+1. **Ingest**: `ffmpeg` extracts the audio track from any container, including video.
+2. **Separation**: [Demucs](https://github.com/facebookresearch/demucs) (`htdemucs_6s`) isolates the guitar from the mix.
+3. **Transcription**: [Basic Pitch](https://github.com/spotify/basic-pitch) detects note pitch, onset and duration on the isolated stem.
+4. **Fingering**: `tab_builder.py` assigns notes to strings and frets. It never emits a chord whose fretted notes exceed the hand span or share a string, and it keeps the fretting hand in one position as long as possible.
+5. **Export**: [PyGuitarPro](https://github.com/Perlence/PyGuitarPro) writes the result to `.gp5`.
+6. **UI**: a React app streams progress, plays the isolated or original track and renders the tab with a playback cursor.
 
-### Бэкенд
+## Tech stack
 
-```bash
-cd backend
-python -m venv .venv
-.venv\Scripts\activate          # Windows; на Linux/macOS: source .venv/bin/activate
-pip install -r requirements.txt
-```
+| Layer | Technologies |
+|---|---|
+| Backend | Python 3.11, FastAPI, Uvicorn, Pydantic, sse-starlette |
+| ML / audio | PyTorch, Demucs, Basic Pitch (ONNX), librosa, ffmpeg |
+| Export | PyGuitarPro |
+| Frontend | React 19, TypeScript, Vite, Tailwind CSS |
+| Infra | Docker, Docker Compose, nginx |
+| Tests | pytest, httpx |
 
-### Фронтенд
+## Getting started
 
-```bash
-cd frontend
-npm install
-```
-
-## Запуск
-
-Нужно держать запущенными оба сервера одновременно.
-
-```bash
-# Терминал 1 — бэкенд (FastAPI на http://127.0.0.1:8000)
-cd backend
-.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
-
-# Терминал 2 — фронтенд (Vite на http://localhost:5173)
-cd frontend
-npm run dev
-```
-
-Открой `http://localhost:5173` в браузере — Vite проксирует запросы `/api/*` на бэкенд.
-
-## Docker
-
-Альтернатива ручной установке выше — поднять весь стек одной командой. Не
-нужно ставить Python, Node или что-либо ещё на хост: всё собирается и
-запускается в контейнерах.
+### Option 1: Docker (recommended)
 
 ```bash
 docker compose up --build
 ```
 
-Открой `http://localhost:5173` — nginx раздаёт собранный фронтенд и
-проксирует `/api/*` на бэкенд (`nginx.conf` делает то же, что Vite-прокси в
-режиме разработки, но для собранного приложения). Первый запуск займёт
-заметное время: сборка `backend`-образа тянет PyTorch и остальной ML-стек, а
-сама обработка первого трека — ещё и веса Demucs (см. ниже).
+Open <http://localhost:5173>. nginx serves the built frontend and proxies `/api/*` to the backend.
 
-Сервисы из `docker-compose.yml`:
+The first build takes a while because the backend image pulls PyTorch and the ML stack. The first processed track also downloads the Demucs weights. Named volumes keep state between restarts:
 
-- **`backend`** — `python:3.11-slim` + PyTorch (CPU-сборка), Demucs, Basic
-  Pitch и uvicorn; слушает `:8000` внутри docker-сети, наружу не публикуется
-  (доступен только через `frontend`/nginx).
-- **`frontend`** — собранный React-бандл за nginx; слушает `:80` в
-  контейнере, опубликован на хосте как `5173`.
+- `jobs_data`: uploaded files, intermediate stems and job results
+- `model_cache`: Demucs weights (several hundred MB), referenced via `TORCH_HOME=/cache/torch`
 
-Именованные тома сохраняют состояние между перезапусками и пересборками:
-
-- **`jobs_data`** — загруженные файлы, промежуточные стемы и результаты
-  обработки заданий (`/app/data/jobs` в контейнере бэкенда).
-- **`model_cache`** — веса Demucs (~сотни МБ); без этого тома модель
-  скачивалась бы заново при каждом пересоздании контейнера. Переменная
-  окружения `TORCH_HOME=/cache/torch` как раз указывает PyTorch Hub, куда их
-  класть и откуда брать.
-
-Полностью сбросить состояние (включая загруженные модели и сохранённые
-задания):
+Reset everything, including cached models and jobs:
 
 ```bash
 docker compose down -v
 ```
 
-## Загрузка моделей
+### Option 2: Local development
 
-Модели скачиваются автоматически при первом обращении и кешируются:
+Requirements: **Python 3.11+**, **Node.js 20+**. You don't need to install `ffmpeg` separately because the backend uses bundled binaries from `imageio-ffmpeg` / `static-ffmpeg`.
 
-- **Demucs (`htdemucs_6s`)** — несколько файлов весов, суммарно ~сотни МБ,
-  кешируется в `~/.cache/torch/hub/checkpoints/`. Скачивается при первом
-  запуске разделения дорожек — это самый долгий шаг обработки первого трека.
-- **Basic Pitch** — модель идёт в комплекте с пакетом `basic-pitch`, отдельно
-  качать не нужно.
+```bash
+# Backend: FastAPI on http://127.0.0.1:8000
+cd backend
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8000
+```
 
-## Тесты
+```bash
+# Frontend: Vite on http://localhost:5173 (proxies /api to the backend)
+cd frontend
+npm install
+npm run dev
+```
+
+### Models
+
+Models are downloaded on first use and cached:
+
+- **Demucs `htdemucs_6s`**: several hundred MB, cached in `~/.cache/torch/hub/checkpoints/`. Downloading it makes the first track the slowest one.
+- **Basic Pitch**: ships with the `basic-pitch` package, so there is nothing to download.
+
+## Tests
 
 ```bash
 cd backend
-.venv\Scripts\python.exe -m pytest
+python -m pytest
 ```
 
-Источник разделения дорожек (Demucs) в тестах подменяется проходным стабом —
-это слишком тяжёлая модель для юнит-тестов. Сама обработка проверяется вручную
-через живое приложение (см. `backend/scripts/`).
+The unit tests cover the fretboard model, the tab builder (span and string constraints, position minimisation), Guitar Pro export and the HTTP API. Demucs is replaced with a pass-through stub in tests because it is too heavy for unit tests. The full pipeline can be checked end to end with the scripts in `backend/scripts/`.
+
+## Project structure
+
+```
+.
+├── backend/
+│   ├── app/
+│   │   ├── api/          # REST + SSE endpoints: upload, jobs, tabs/export
+│   │   ├── jobs/         # Background job manager
+│   │   ├── models/       # Pydantic schemas
+│   │   ├── pipeline/     # ingest → separation → transcription → tab_builder → gp_export
+│   │   └── main.py       # FastAPI app
+│   ├── scripts/          # Smoke / end-to-end helpers
+│   ├── tests/            # pytest suite + synthetic audio fixture
+│   └── Dockerfile
+├── frontend/
+│   ├── src/
+│   │   ├── api/          # Typed API client
+│   │   ├── components/   # UploadDropzone, SettingsPanel, ProcessingTimeline, AudioPlayer, TabViewer
+│   │   └── App.tsx
+│   ├── nginx.conf        # Production proxy config
+│   └── Dockerfile
+└── docker-compose.yml
+```
+
+## License
+
+[MIT](LICENSE)
