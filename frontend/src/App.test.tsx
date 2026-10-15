@@ -400,6 +400,35 @@ describe("editing the tab", () => {
     expect(puts).toHaveLength(1);
   });
 
+  it("re-fingers the selected bars into a chosen position as one undoable edit", async () => {
+    const { puts, fetchMock } = serve();
+    // The server answers the re-finger request with the notes moved.
+    const base = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith("/refinger")) {
+        const body = JSON.parse(String(init!.body));
+        expect(body.position).toBe(7);
+        expect(body.openStrings).toBe("avoid");
+        return json({ events: body.events.map((e: { notes: { string: number }[] }) => ({ ...e, notes: [{ string: 2, fret: 7 }] })) });
+      }
+      return base(input, init);
+    });
+    await openEditor();
+
+    expect(screen.getByText(/выдели такты/)).toBeInTheDocument();
+    fireEvent.click(document.querySelector('[data-bar="0"]')!, { shiftKey: true });
+    expect(await screen.findByText(/Такт 1: переложить в позицию/)).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Лад позиции" }), { target: { value: "7" } });
+    fireEvent.click(screen.getByRole("button", { name: "Переложить" }));
+
+    await waitFor(() => expect(puts).toHaveLength(1), { timeout: 2000 });
+    expect(puts[0].tracks[0].events[0].notes).toEqual([{ string: 2, fret: 7 }]);
+
+    fireEvent.keyDown(window, { code: "KeyZ", key: "z", ctrlKey: true });
+    await waitFor(() => expect(puts).toHaveLength(2), { timeout: 2000 });
+    expect(puts[1].tracks[0].events[0].notes).toEqual([{ string: 0, fret: 3 }]);
+  });
+
   it("reverts all edits after an inline confirmation", async () => {
     const { puts, fetchMock } = serve();
     await openEditor();

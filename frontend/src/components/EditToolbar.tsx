@@ -23,6 +23,10 @@ interface Props {
   onDelete: () => void;
   onRevert: () => void;
   onDone: () => void;
+  /** Bars selected on the sheet (drag over bar numbers / Shift+click), 1-based label like "80–81". */
+  selectionLabel: string | null;
+  onRefinger: (position: number) => void;
+  refingering: boolean;
 }
 
 /** Number of the string as guitarists count: 1 = the thinnest (highest). */
@@ -61,6 +65,8 @@ export default function EditToolbar(props: Props) {
   const { note } = props;
   const fretId = useId();
   const [confirmRevert, setConfirmRevert] = useState(false);
+  const [position, setPosition] = useState(5);
+  const positionId = useId();
 
   return (
     <div role="toolbar" aria-label="Правка табулатуры" className="grid gap-3 rounded-lg border border-accent bg-surface p-3 sm:p-4">
@@ -121,6 +127,47 @@ export default function EditToolbar(props: Props) {
             Готово
           </Button>
         </span>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 border-t border-line pt-2">
+        {props.selectionLabel ? (
+          <>
+            <span className="text-sm font-medium">
+              {props.selectionLabel.includes("–") ? "Такты" : "Такт"} {props.selectionLabel}: переложить в позицию
+            </span>
+            <div className="flex items-center gap-1">
+              <Button variant="secondary" className="w-11 px-0" aria-label="Позиция ниже" onClick={() => setPosition((p) => Math.max(1, p - 1))} disabled={position <= 1}>
+                −
+              </Button>
+              <label htmlFor={positionId} className="sr-only">
+                Лад позиции
+              </label>
+              <input
+                id={positionId}
+                type="number"
+                inputMode="numeric"
+                min={1}
+                max={17}
+                value={position}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  if (Number.isInteger(v)) setPosition(Math.max(1, Math.min(17, v)));
+                }}
+                className="tabular min-h-11 w-16 rounded-md border border-line-strong bg-surface px-2 text-center font-mono text-[15px] font-bold text-fg"
+              />
+              <Button variant="secondary" className="w-11 px-0" aria-label="Позиция выше" onClick={() => setPosition((p) => Math.min(17, p + 1))} disabled={position >= 17}>
+                +
+              </Button>
+            </div>
+            <Button variant="secondary" loading={props.refingering} onClick={() => props.onRefinger(position)}>
+              Переложить
+            </Button>
+          </>
+        ) : (
+          <span className="text-[13px] text-muted">
+            Чтобы переложить фрагмент в другую позицию, выдели такты: потяни по их номерам или кликни с Shift.
+          </span>
+        )}
       </div>
 
       <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line pt-2">

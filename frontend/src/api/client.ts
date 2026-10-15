@@ -1,4 +1,4 @@
-import type { JobResult, JobStatus, JobSummary, TabSettings, TabTrack } from "../types";
+import type { JobResult, JobStatus, JobSummary, TabEvent, TabSettings, TabTrack } from "../types";
 
 const BASE = "/api";
 
@@ -135,6 +135,22 @@ export async function saveTab(jobId: string, baseRevision: number, tracks: TabTr
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ baseRevision, tracks }),
   });
+}
+
+/** Re-finger notes (same pitches, new strings/frets) around a position.
+ * Nothing is saved — the caller commits the result as an ordinary edit. */
+export async function refingerEvents(
+  jobId: string,
+  events: TabEvent[],
+  position: number | null,
+  openStrings: "auto" | "avoid" = "avoid",
+): Promise<TabEvent[]> {
+  const res = await request<{ events: TabEvent[] }>(`${BASE}/jobs/${jobId}/refinger`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ events, position, openStrings }),
+  });
+  return res.events;
 }
 
 /** Throw away every manual edit and go back to the pipeline's output. */

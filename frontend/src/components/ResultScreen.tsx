@@ -7,6 +7,7 @@ import { tuningLetters, presetFor } from "../lib/tuning";
 import { resolveEditKey, typeDigit } from "../lib/editKeys";
 import { addNote, deleteNote, editContext, getNote, moveString, neighbourNote, setFret, shiftFret, type NoteRef } from "../lib/tabEdit";
 import { useTabEditor } from "../lib/useTabEditor";
+import { errorMessage, refingerEvents } from "../api/client";
 import EditToolbar from "./EditToolbar";
 import PlayerBar from "./PlayerBar";
 import ShortcutsDialog from "./ShortcutsDialog";
@@ -101,6 +102,32 @@ export default function ResultScreen({ result, onReset }: Props) {
         selectNote(added.ref);
       }
     },
+  };
+
+  // "Переложить в позицию": re-finger the selected bars on the server and
+  // commit the result as one undoable edit.
+  const [refingering, setRefingering] = useState(false);
+  const [refingerError, setRefingerError] = useState<string | null>(null);
+  const refingerSelection = async (position: number) => {
+    if (!selection) return;
+    const start = spans[selection.start].start - 0.03;
+    const end = spans[selection.end].end - 0.03;
+    const indices = track.events.map((e, i) => (e.time >= start && e.time < end ? i : -1)).filter((i) => i >= 0);
+    if (!indices.length) return;
+    setRefingering(true);
+    setRefingerError(null);
+    try {
+      const moved = await refingerEvents(result.job.id, indices.map((i) => track.events[i]), position, "avoid");
+      const events = track.events.slice();
+      indices.forEach((index, k) => {
+        events[index] = moved[k];
+      });
+      commitTrack({ ...track, events }, null);
+    } catch (e) {
+      setRefingerError(errorMessage(e, "Не получилось переложить такты"));
+    } finally {
+      setRefingering(false);
+    }
   };
 
   useEffect(() => {
@@ -288,7 +315,15 @@ export default function ResultScreen({ result, onReset }: Props) {
             setEditing(false);
             setSelected(null);
           }}
+          selectionLabel={loopLabel}
+          onRefinger={(position) => void refingerSelection(position)}
+          refingering={refingering}
         />
+      )}
+      {editing && refingerError && (
+        <p role="alert" className="text-[14px] text-danger">
+          {refingerError}
+        </p>
       )}
 
       {noteCount === 0 && !editing ? (

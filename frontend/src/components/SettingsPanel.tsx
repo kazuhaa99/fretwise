@@ -20,7 +20,7 @@ function settingsSummary(settings: TabSettings): string {
   const tuning = preset ? preset.label : tuningLetters(settings.tuning);
   const capo = settings.capo > 0 ? `капо ${settings.capo}` : "без капо";
   const span = `растяжка до ${settings.maxFretSpan} ${plural(settings.maxFretSpan, ["лада", "ладов", "ладов"])}`;
-  return `${tuning} · ${capo} · ${span}`;
+  return `${tuning} · ${capo} · ${span}${settings.openStrings === "avoid" ? " · в позиции" : ""}`;
 }
 
 export default function SettingsPanel({ settings, onChange, onValidityChange, defaultOpen = false }: Props) {
@@ -165,6 +165,24 @@ export default function SettingsPanel({ settings, onChange, onValidityChange, de
               аккорда может пропасть. Больше — ближе к записи, но тяжелее играть.
             </p>
           </div>
+
+          <fieldset className="grid gap-2">
+            <legend className="mb-2 text-sm font-medium">Открытые струны</legend>
+            <Segmented
+              label="Открытые струны"
+              value={settings.openStrings ?? "auto"}
+              onChange={(openStrings) => onChange({ ...settings, openStrings })}
+              options={[
+                { value: "auto", label: "Когда удобнее" },
+                { value: "avoid", label: "Играть в позиции" },
+              ]}
+            />
+            <p className="text-[13px] text-muted">
+              Одни и те же ноты часто можно взять и с открытыми струнами, и выше по грифу — на слух разница почти не
+              слышна. «В позиции» подойдёт, если в песне аккорды берутся выше по грифу или с большим пальцем сверху (как у
+              Хендрикса): тогда, например, ля мажор выйдет как 5-x-7-6-5, а не x-0-2-2-2-0.
+            </p>
+          </fieldset>
 
           <div className="grid gap-2">
             <label htmlFor={ids.jump} className="flex items-baseline justify-between gap-3 text-sm font-medium">

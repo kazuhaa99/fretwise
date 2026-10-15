@@ -25,6 +25,7 @@ export interface TabSettings {
   capo: number;
   maxFretSpan: number; // playability strictness: comfortable hand stretch in frets
   positionJumpWeight: number; // how strongly to penalize jumping up/down the neck
+  openStrings: "auto" | "avoid"; // "avoid": play in position (e.g. thumb-over chords) rather than open shapes
 }
 
 export const DEFAULT_SETTINGS: TabSettings = {
@@ -32,6 +33,7 @@ export const DEFAULT_SETTINGS: TabSettings = {
   capo: 0,
   maxFretSpan: 4,
   positionJumpWeight: 1.0,
+  openStrings: "auto",
 };
 
 export interface TabNote {

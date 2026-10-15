@@ -24,6 +24,9 @@ The resulting tab plays back in the browser with a cursor synced to the audio, a
 - The job lives in the URL (`?job=…`), so a reload brings you back to the same progress screen or result
 - **Job history** on the start screen: previous transcriptions (with their edits) survive server restarts and open in one click; finished jobs expire after `FRETWISE_JOB_TTL_HOURS`
 - **Fix notes in the browser**: change fret or string, delete or add notes, undo/redo (Ctrl+Z / Ctrl+Shift+Z); edits are saved on the server and every export includes them
+- **Re-finger a passage**: select bars and move them to a hand position (e.g. an A-major run to 7th position) — same notes, new strings and frets, undoable like any edit
+- Fingering style setting: open strings when easier, or play in position (e.g. thumb-over chords: A as 5-x-7-6-5 instead of x-0-2-2-2-0)
+- Notes transcribed from separation bleed while the guitar is silent are filtered out
 - **Export** to Guitar Pro (`.gp5`, via PyGuitarPro), plain-text ASCII tab (`.txt`) and Standard MIDI (`.mid`), all on the same bar grid
 - One-command **Docker Compose** setup
 
@@ -61,6 +64,7 @@ More in [`docs/screenshots/`](docs/screenshots). They are generated from the pro
 | `GET` | `/api/jobs/{id}/export.mid` | Standard MIDI File |
 | `PUT` | `/api/jobs/{id}/tab` | Save edited tracks (`baseRevision` + `tracks`); 409 if edited elsewhere |
 | `DELETE` | `/api/jobs/{id}/edits` | Revert to the tab as transcribed |
+| `POST` | `/api/jobs/{id}/refinger` | Re-finger given notes around a position (returns events, saves nothing) |
 | `DELETE` | `/api/jobs/{id}` | Delete a finished job and its files |
 
 ## Tech stack

@@ -454,7 +454,7 @@ export default function TabSheet({
   );
   const onBarClick = useCallback(
     (rowIndex: number, bar: number, e: React.MouseEvent<SVGRectElement>) => {
-      if (editing) {
+      if (editing && !e.shiftKey) {
         // Add a note where the click landed: nearest string line, and either
         // the note column under the pointer or the nearest sixteenth.
         const svg = e.currentTarget.ownerSVGElement;

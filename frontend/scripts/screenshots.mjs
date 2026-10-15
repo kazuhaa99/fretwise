@@ -212,6 +212,8 @@ await shot("edit-desktop-light", {
   query: `?job=${JOB}`,
   prepare: async (page) => {
     await page.getByRole("button", { name: "Править" }).click();
+    await page.locator('[data-bar="4"]').first().click({ position: { x: 30, y: 80 }, modifiers: ["Shift"] });
+    await page.locator('[data-bar="5"]').first().click({ position: { x: 30, y: 80 }, modifiers: ["Shift"] });
     await page.locator('[data-note="24:0"]').click();
   },
 });
