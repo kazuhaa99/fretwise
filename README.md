@@ -12,6 +12,8 @@ The resulting tab plays back in the browser with a cursor synced to the audio, a
 - Guitar stem separation with **Demucs** (`htdemucs_6s`)
 - Note transcription (pitch, onset, duration) with Spotify's **Basic Pitch**
 - **Playability-aware fingering**: a custom Viterbi-style dynamic program over the fretboard. It discards voicings outside the hand span or with two notes on one string, and minimises position shifts
+- **Bends and vibrato** read from Basic Pitch's pitch contours, including whole-step bends the tracker splits into two notes
+- **Bar lines that follow the music**: beat tracking, 3/4 vs 4/4 detection and downbeat alignment, with pickup bars when needed
 - Tunable settings: guitar tuning (Standard, Drop D, Eb, Open D), capo, max fret span, position-shift weight
 - Real-time processing progress over **Server-Sent Events**
 - Tab viewer with playback of the isolated stem or the original mix and a synced cursor
@@ -20,12 +22,13 @@ The resulting tab plays back in the browser with a cursor synced to the audio, a
 
 ## How it works
 
-1. **Ingest**: `ffmpeg` extracts the audio track from any container, including video.
+1. **Ingest**: `ffmpeg` extracts the audio track from any container, including video, and keeps it in stereo because Demucs separates stereo noticeably better.
 2. **Separation**: [Demucs](https://github.com/facebookresearch/demucs) (`htdemucs_6s`) isolates the guitar from the mix.
-3. **Transcription**: [Basic Pitch](https://github.com/spotify/basic-pitch) detects note pitch, onset and duration on the isolated stem.
+3. **Transcription**: [Basic Pitch](https://github.com/spotify/basic-pitch) detects note pitch, onset and duration on the isolated stem. `expression.py` reads each note's pitch contour to mark bends and vibrato.
 4. **Fingering**: `tab_builder.py` assigns notes to strings and frets. It never emits a chord whose fretted notes exceed the hand span or share a string, and it keeps the fretting hand in one position as long as possible.
-5. **Export**: [PyGuitarPro](https://github.com/Perlence/PyGuitarPro) writes the result to `.gp5`.
-6. **UI**: a React app streams progress, plays the isolated or original track and renders the tab with a playback cursor.
+5. **Rhythm**: `rhythm.py` tracks beats with librosa, chooses between 3/4 and 4/4 and finds the first downbeat, so bars line up with the music.
+6. **Export**: [PyGuitarPro](https://github.com/Perlence/PyGuitarPro) writes the result to `.gp5` with the real tuning, the capo in the track's capo field, and bends and vibrato as Guitar Pro effects.
+7. **UI**: a React app streams progress, plays the isolated or original track and renders the tab with a playback cursor.
 
 ## Tech stack
 

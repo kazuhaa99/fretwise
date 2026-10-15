@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import AsyncIterable, Optional
 
 from ..models import schemas
-from ..pipeline import gp_export, ingest, separation, transcription
+from ..pipeline import gp_export, ingest, rhythm, separation, transcription
 from ..pipeline.fretboard import Fretboard
 from ..pipeline.tab_builder import build_multi_track_tab
 
@@ -431,22 +431,22 @@ async def _run_pipeline(job: Job) -> None:
 
         job.publish(stage="exporting", progress=0.0, message="Собираем файл для Guitar Pro")
         samples, sample_rate = await _run_blocking(_load_mono_samples, job.guitar_stem_path)
-        tempo = await _run_blocking(gp_export.estimate_tempo, samples, sample_rate)
-        await _run_blocking(
+        grid = await _run_blocking(rhythm.analyze_rhythm, samples, sample_rate)
+        layout = await _run_blocking(
             gp_export.export_gp5,
             tracks,
             fretboard,
             job.tab_path,
             title=job.title,
             artist="Fretwise",
-            tempo=tempo,
+            grid=grid,
         )
 
         # Build the result *before* announcing "done" — otherwise a client could
         # see the terminal status over SSE and request /result before it exists.
         final_status = schemas.JobStatus(id=job.id, stage="done", progress=1.0, message="Готово!")
         job.result = _build_result(
-            job, status=final_status, tracks=tracks, fretboard=fretboard, tempo=tempo, duration_seconds=duration_seconds
+            job, status=final_status, tracks=tracks, layout=layout, duration_seconds=duration_seconds
         )
         job._emit(final_status)
 
@@ -457,13 +457,17 @@ async def _run_pipeline(job: Job) -> None:
 
 
 def _build_result(
-    job: Job, *, status: schemas.JobStatus, tracks, fretboard: Fretboard, tempo: int, duration_seconds: float
+    job: Job, *, status: schemas.JobStatus, tracks, layout: gp_export.Layout, duration_seconds: float
 ) -> schemas.JobResult:
     tab = schemas.TabData(
         tuning=list(job.settings.tuning),
         capo=job.settings.capo,
-        tempo_bpm=tempo,
+        tempo_bpm=layout.grid.tempo,
         duration_seconds=duration_seconds,
+        beats_per_measure=layout.grid.beats_per_measure,
+        # The exact bar lines written to the .gp5, so the in-browser tab and
+        # the downloaded file agree on where every measure starts.
+        measure_times=[round(t, 4) for t in layout.measure_start_times()],
         tracks=[
             schemas.TabTrack(
                 name=gp_export.track_name(index, len(tracks)),
@@ -472,7 +476,12 @@ def _build_result(
                         time=event.time,
                         duration=event.duration,
                         notes=[
-                            schemas.TabNote(string=note.string, fret=note.fret, technique=note.technique)
+                            schemas.TabNote(
+                                string=note.string,
+                                fret=note.fret,
+                                technique=note.technique,
+                                bend_semitones=note.bend_semitones if note.technique == "bend" else None,
+                            )
                             for note in event.notes
                         ],
                     )

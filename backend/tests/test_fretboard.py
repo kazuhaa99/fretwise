@@ -46,3 +46,12 @@ def test_capo_shifts_open_pitch_and_fret_numbering():
     target = plain.open_pitch(0) + 5
     assert (0, 5) in plain.candidates(target)
     assert (0, 3) in capoed.candidates(target)
+
+
+def test_capo_reduces_the_frets_available_above_it():
+    fb = Fretboard.from_note_names(["E2", "A2", "D3", "G3", "B3", "E4"], capo=5, max_fret=22)
+    assert fb.frets_above_capo == 17
+    top = note_name_to_midi("E4") + 22  # 22nd fret from the nut on the high E
+    assert (5, 17) in fb.candidates(top)
+    assert not any(fret > 17 for _, fret in fb.candidates(top - 1))
+    assert fb.candidates(top + 1) == []

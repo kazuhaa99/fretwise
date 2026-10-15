@@ -33,6 +33,14 @@ class Note:
     onset: float
     duration: float
     confidence: float = 1.0
+    # Frame-by-frame pitch offset from `pitch_midi` in semitones, and its frame
+    # rate — Basic Pitch's pitch-bend contour (see `expression.py`).
+    pitch_bends: list[float] | None = None
+    contour_fps: float = 0.0
+    # Filled in by `expression.annotate_expressions`.
+    expression: str | None = None  # "bend" | "vibrato"
+    bend_semitones: float = 0.0
+    bend_release: bool = False
 
 
 @dataclass
@@ -40,6 +48,10 @@ class TabNote:
     string: int
     fret: int
     technique: str | None = None
+    # Only meaningful for technique == "bend": how far the string is bent (in
+    # semitones, 1.0 = half-step, 2.0 = full) and whether it comes back down.
+    bend_semitones: float | None = None
+    bend_release: bool = False
 
 
 @dataclass
@@ -103,12 +115,15 @@ def _merge_oversegmented_sustains(notes: list[Note]) -> list[Note]:
             return
         if len(run) > 1 and _is_oversegmented_sustain(run):
             first, last = run[0], run[-1]
-            merged.append(Note(
+            merged_note = Note(
                 pitch_midi=first.pitch_midi,
                 onset=first.onset,
                 duration=max(last.onset + last.duration - first.onset, first.duration),
                 confidence=max(n.confidence for n in run),
-            ))
+                contour_fps=first.contour_fps,
+            )
+            _merge_expressions(merged_note, run)
+            merged.append(merged_note)
         else:
             merged.extend(run)
 
@@ -122,6 +137,32 @@ def _merge_oversegmented_sustains(notes: list[Note]) -> list[Note]:
 
     merged.sort(key=lambda n: n.onset)
     return merged
+
+
+def _merge_expressions(merged: Note, run: list[Note]) -> None:
+    """Carry bend/vibrato information into a note stitched from fragments.
+
+    Vibrato is a classic cause of over-segmentation (the wobble drags the
+    tracker's confidence up and down), and each fragment alone is often too
+    short to show it. So when every fragment has a contour, the joined contour
+    is re-classified as one note; otherwise the strongest expression any
+    fragment carried wins (a bend over vibrato over nothing).
+    """
+    from .expression import apply_expression, classify_contour  # local: expression imports this module
+
+    if merged.contour_fps and all(n.pitch_bends for n in run):
+        # Fragments are relative to their own pitch, which is the same for the
+        # whole run, so their contours concatenate directly.
+        merged.pitch_bends = [value for n in run for value in (n.pitch_bends or [])]
+        apply_expression(merged, classify_contour(merged.pitch_bends, merged.contour_fps))
+        if merged.expression:
+            return
+    bends = [n for n in run if n.expression == "bend"]
+    if bends:
+        strongest = max(bends, key=lambda n: n.bend_semitones)
+        merged.expression, merged.bend_semitones, merged.bend_release = "bend", strongest.bend_semitones, strongest.bend_release
+    elif any(n.expression == "vibrato" for n in run):
+        merged.expression = "vibrato"
 
 
 _ONSET_EPSILON = 0.045  # how close two onsets must be to read as "the same strike"
@@ -300,6 +341,9 @@ def _best_voicing_sequence(
 
 
 _LEGATO_GAP = 0.09  # seconds between notes still considered a connected phrase
+# Techniques read off the pitch contour (`expression.py`) before this pass runs;
+# timing heuristics never overwrite them.
+_CONTOUR_TECHNIQUES = frozenset({"bend", "vibrato"})
 _SLIDE_FRET_DELTA = 4  # same-string jumps at least this big read as a slide, not h/p
 
 # A run of identical-pitch notes can mean three different things, and the only
@@ -354,6 +398,8 @@ def _annotate_techniques(events: list[TabEvent]) -> None:
             note, time, _duration = sequence[k]
             prev_note, prev_time, prev_duration = sequence[k - 1]
             gap = time - (prev_time + prev_duration)
+            if note.technique in _CONTOUR_TECHNIQUES:
+                continue  # measured from the pitch contour — stronger evidence than timing
             if 0 <= gap <= _LEGATO_GAP and note.fret != prev_note.fret:
                 delta = note.fret - prev_note.fret
                 if abs(delta) >= _SLIDE_FRET_DELTA:
@@ -374,7 +420,8 @@ def _annotate_techniques(events: list[TabEvent]) -> None:
                 run = sequence[run_start:k]
                 if _run_is_tremolo([time for _, time, _ in run]):
                     for run_note, _, _ in run:
-                        run_note.technique = "tremolo"
+                        if run_note.technique not in _CONTOUR_TECHNIQUES:
+                            run_note.technique = "tremolo"
                 run_start = k
 
 
@@ -500,8 +547,8 @@ def build_tab(
     `_voicings_for_pitches`), so the output can never contain them.
     """
     notes = _merge_oversegmented_sustains(notes)
-    raw_events = group_into_events(notes)
-    if not raw_events:
+    clusters = _cluster_by_onset(notes)
+    if not clusters:
         return []
 
     # Build candidate voicings per strike, then drop any strike that has none —
@@ -511,10 +558,19 @@ def build_tab(
     # an unplayable strike as a dropped note (a silent rest) is also the
     # musically sane choice: better to omit one note than to either crash or
     # smuggle an impossible shape through.
-    prepared: list[tuple[float, float, list[Voicing]]] = []
-    for time, duration, raw_pitches in raw_events:
+    prepared: list[tuple[float, float, list[Voicing], dict[int, Note]]] = []
+    for cluster in clusters:
+        time = min(n.onset for n in cluster)
+        duration = max(max(n.onset + n.duration for n in cluster) - time, 0.01)
+        # Which source note (and so which bend/vibrato) ends up at each
+        # playable pitch, after octave-shifting out-of-range notes.
+        expressive: dict[int, Note] = {}
+        for n in cluster:
+            shifted = _nearest_reachable_pitch(fretboard, n.pitch_midi)
+            if shifted is not None and n.expression and shifted not in expressive:
+                expressive[shifted] = n
         pitches = sorted(set(
-            p for p in (_nearest_reachable_pitch(fretboard, raw) for raw in raw_pitches) if p is not None
+            p for p in (_nearest_reachable_pitch(fretboard, n.pitch_midi) for n in cluster) if p is not None
         ))
         if not pitches:
             continue
@@ -525,16 +581,25 @@ def build_tab(
         if not voicings:
             continue
 
-        prepared.append((time, duration, _prune(voicings)))
+        prepared.append((time, duration, _prune(voicings), expressive))
 
     if not prepared:
         return []
 
-    chosen = _best_voicing_sequence([voicings for _, _, voicings in prepared], position_jump_weight)
+    chosen = _best_voicing_sequence([voicings for _, _, voicings, _ in prepared], position_jump_weight)
 
     tab_events: list[TabEvent] = []
-    for (time, duration, _), voicing in zip(prepared, chosen):
-        notes_out = [TabNote(string=string_index, fret=fret) for string_index, fret in voicing]
+    for (time, duration, _, expressive), voicing in zip(prepared, chosen):
+        notes_out = []
+        for string_index, fret in voicing:
+            tab_note = TabNote(string=string_index, fret=fret)
+            source = expressive.get(fretboard.open_pitch(string_index) + fret)
+            if source is not None:
+                tab_note.technique = source.expression
+                if source.expression == "bend":
+                    tab_note.bend_semitones = source.bend_semitones
+                    tab_note.bend_release = source.bend_release
+            notes_out.append(tab_note)
         tab_events.append(TabEvent(time=time, duration=duration, notes=notes_out))
 
     _annotate_techniques(tab_events)

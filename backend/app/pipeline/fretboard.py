@@ -57,11 +57,18 @@ class Fretboard:
         """Sounding pitch of `string_index` at fret 0 (i.e. at the capo)."""
         return self.tuning_midi[string_index] + self.capo
 
+    @property
+    def frets_above_capo(self) -> int:
+        """Playable frets above the capo: `max_fret` counts from the nut, so a
+        capo at the 5th fret of a 22-fret neck leaves 17 frets, not 22."""
+        return max(0, self.max_fret - self.capo)
+
     def candidates(self, midi_pitch: int) -> list[tuple[int, int]]:
-        """Every (string_index, fret) pair that produces `midi_pitch`, fret in [0, max_fret]."""
+        """Every (string_index, fret) pair that produces `midi_pitch`, fret in
+        [0, frets_above_capo] (frets relative to the capo)."""
         out: list[tuple[int, int]] = []
         for string_index in range(self.string_count):
             fret = midi_pitch - self.open_pitch(string_index)
-            if 0 <= fret <= self.max_fret:
+            if 0 <= fret <= self.frets_above_capo:
                 out.append((string_index, fret))
         return out

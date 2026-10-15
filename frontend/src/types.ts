@@ -34,6 +34,7 @@ export interface TabNote {
   string: number; // 0 = lowest string, 5 = highest (standard 6-string)
   fret: number;
   technique?: "hammer_on" | "pull_off" | "slide" | "bend" | "vibrato" | "palm_mute" | "tremolo" | null;
+  bendSemitones?: number | null; // only with technique "bend": 1 = half-step, 2 = full
 }
 
 export interface TabEvent {
@@ -52,6 +53,8 @@ export interface TabData {
   capo: number;
   tempoBpm: number;
   durationSeconds: number;
+  beatsPerMeasure: number; // 3 or 4 — detected meter, same as in the .gp5
+  measureTimes: number[]; // start of every bar in seconds (first may be negative: pickup)
   tracks: TabTrack[];
 }
 

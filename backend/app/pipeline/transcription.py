@@ -12,8 +12,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from basic_pitch import FilenameSuffix, build_icassp_2022_model_path
+from basic_pitch.constants import ANNOTATIONS_FPS
 from basic_pitch.inference import predict
 
+from .expression import CONTOUR_BINS_PER_SEMITONE, annotate_expressions
 from .tab_builder import Note
 
 _ONNX_MODEL_PATH = build_icassp_2022_model_path(FilenameSuffix.onnx)
@@ -51,9 +53,19 @@ def transcribe_notes(
     )
 
     notes: list[Note] = []
-    for start_s, end_s, pitch_midi, amplitude, _pitch_bends in note_events:
+    for start_s, end_s, pitch_midi, amplitude, pitch_bends in note_events:
         duration = max(end_s - start_s, 0.01)
-        notes.append(Note(pitch_midi=int(pitch_midi), onset=float(start_s), duration=duration, confidence=float(amplitude)))
+        notes.append(Note(
+            pitch_midi=int(pitch_midi),
+            onset=float(start_s),
+            duration=duration,
+            confidence=float(amplitude),
+            # Per-frame offsets in 1/3-semitone bins -> semitones; read by
+            # `expression.py` to find bends and vibrato.
+            pitch_bends=[float(b) / CONTOUR_BINS_PER_SEMITONE for b in pitch_bends] if pitch_bends is not None else None,
+            contour_fps=float(ANNOTATIONS_FPS),
+        ))
 
+    notes = annotate_expressions(notes)
     notes.sort(key=lambda n: n.onset)
     return notes

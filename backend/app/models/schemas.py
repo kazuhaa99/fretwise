@@ -88,9 +88,13 @@ class TabSettings(BaseModel):
 
 
 class TabNote(BaseModel):
+    model_config = _camel_config
+
     string: int
     fret: int
     technique: Optional[Technique] = None
+    # Set only when technique == "bend": bend size in semitones (1 = half-step, 2 = full).
+    bend_semitones: Optional[float] = Field(None, alias="bendSemitones")
 
 
 class TabEvent(BaseModel):
@@ -111,6 +115,10 @@ class TabData(BaseModel):
     capo: int
     tempo_bpm: int = Field(alias="tempoBpm")
     duration_seconds: float = Field(alias="durationSeconds")
+    beats_per_measure: int = Field(4, alias="beatsPerMeasure")
+    # Start time (seconds) of every bar, matching the .gp5 export exactly. The
+    # first may be negative when a pickup bar begins before the audio does.
+    measure_times: list[float] = Field(default_factory=list, alias="measureTimes")
     tracks: list[TabTrack]
 
 

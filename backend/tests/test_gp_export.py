@@ -1,9 +1,11 @@
 from pathlib import Path
 
 import guitarpro as gp
+import pytest
 
 from app.pipeline.fretboard import Fretboard, note_name_to_midi
 from app.pipeline.gp_export import _slot_seconds, _total_slots, export_gp5, track_name
+from app.pipeline.rhythm import BeatGrid
 from app.pipeline.tab_builder import Note, TabEvent, TabNote, build_tab
 
 STANDARD = Fretboard.from_note_names(["E2", "A2", "D3", "G3", "B3", "E4"], max_fret=22)
@@ -153,3 +155,93 @@ def test_export_with_unencodable_title_degrades_instead_of_crashing(tmp_path):
     out = tmp_path / "mixed.gp5"
     export_gp5([_sample_tab()], STANDARD, out, title="ギター riff", artist="Fretwise", tempo=120)
     assert gp.parse(str(out)).title.endswith(" riff")
+
+
+def test_capo_is_written_as_capo_not_folded_into_tuning(tmp_path):
+    capo = 3
+    fretboard = Fretboard.from_note_names(["E2", "A2", "D3", "G3", "B3", "E4"], capo=capo, max_fret=22)
+    notes = [
+        Note(note_name_to_midi("C3"), onset=0.0, duration=0.4),
+        Note(note_name_to_midi("G3"), onset=0.5, duration=0.4),
+        Note(note_name_to_midi("D4"), onset=1.0, duration=0.4),
+    ]
+    tab = build_tab(notes, fretboard, max_fret_span=4, position_jump_weight=1.0)
+    out = tmp_path / "capo.gp5"
+    export_gp5([tab], fretboard, out, tempo=120)
+
+    track = gp.parse(str(out)).tracks[0]
+    assert track.offset == capo
+    # The real tuning, not the capo'd one.
+    assert {s.number: s.value for s in track.strings}[6] == note_name_to_midi("E2")
+    assert {s.number: s.value for s in track.strings}[1] == note_name_to_midi("E4")
+
+    # Guitar Pro sounds `string tuning + capo + fret`; that must reproduce the
+    # transcribed pitches exactly.
+    sounded = [
+        track.strings[note.string - 1].value + track.offset + note.value
+        for measure in track.measures
+        for beat in measure.voices[0].beats
+        for note in beat.notes
+        if note.type == gp.NoteType.normal
+    ]
+    assert sounded == [n.pitch_midi for n in notes]
+
+
+def test_three_four_grid_writes_three_four_bars_aligned_to_the_downbeat(tmp_path):
+    # Downbeat at 0.75s (120 BPM, 3/4): a note on it must open bar 2, and the
+    # earlier note becomes a pickup in bar 1.
+    grid = BeatGrid.uniform(tempo=120, beats_per_measure=3, first_downbeat=0.75)
+    tab = [
+        TabEvent(time=0.25, duration=0.2, notes=[TabNote(string=0, fret=3)]),
+        TabEvent(time=0.75, duration=0.2, notes=[TabNote(string=0, fret=5)]),
+        TabEvent(time=2.25, duration=0.2, notes=[TabNote(string=0, fret=7)]),  # next downbeat
+    ]
+    out = tmp_path / "waltz.gp5"
+    layout = export_gp5([tab], STANDARD, out, grid=grid)
+
+    song = gp.parse(str(out))
+    track = song.tracks[0]
+    assert all(h.timeSignature.numerator == 3 for h in song.measureHeaders)
+    for measure in track.measures:
+        assert sum(beat.duration.time for beat in measure.voices[0].beats) == gp.Duration.quarterTime * 3
+
+    def first_struck_fret(measure):
+        for beat in measure.voices[0].beats:
+            if beat.notes and beat.notes[0].type == gp.NoteType.normal:
+                return beat.notes[0].value
+        return None
+
+    first_beat = lambda m: m.voices[0].beats[0]  # noqa: E731
+    assert first_struck_fret(track.measures[0]) == 3  # pickup
+    assert first_beat(track.measures[1]).notes[0].value == 5  # exactly on bar 2's downbeat
+    assert first_beat(track.measures[2]).notes[0].value == 7
+    assert layout.lead_in_beats == 3
+    assert layout.measure_start_times()[:3] == pytest.approx([-0.75, 0.75, 2.25])
+
+
+def test_bend_and_vibrato_are_written_as_gp_effects(tmp_path):
+    tab = [
+        TabEvent(time=0.0, duration=0.5, notes=[TabNote(string=3, fret=7, technique="bend", bend_semitones=2.0)]),
+        TabEvent(time=0.5, duration=0.5, notes=[TabNote(string=3, fret=7, technique="bend", bend_semitones=1.0, bend_release=True)]),
+        TabEvent(time=1.0, duration=1.0, notes=[TabNote(string=2, fret=5, technique="vibrato")]),
+    ]
+    out = tmp_path / "fx.gp5"
+    export_gp5([tab], STANDARD, out, tempo=120)
+    notes = [
+        note
+        for measure in gp.parse(str(out)).tracks[0].measures
+        for beat in measure.voices[0].beats
+        for note in beat.notes
+    ]
+    struck = [n for n in notes if n.type == gp.NoteType.normal]
+
+    full, half_release, vib = struck
+    assert full.effect.bend.type == gp.BendType.bend
+    assert max(p.value for p in full.effect.bend.points) == 4  # quarter tones: full bend
+    assert half_release.effect.bend.type == gp.BendType.bendRelease
+    assert max(p.value for p in half_release.effect.bend.points) == 2
+    assert half_release.effect.bend.points[-1].value == 0
+    assert vib.effect.vibrato
+    # Vibrato continues across the tied part of the note.
+    tied_vibrato = [n for n in notes if n.type == gp.NoteType.tie and n.string == vib.string]
+    assert tied_vibrato and all(n.effect.vibrato for n in tied_vibrato)

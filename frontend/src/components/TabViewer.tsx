@@ -1,21 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { TabData, TabNote } from "../types";
+import type { TabData } from "../types";
+import { techniqueMark } from "./tabNotation";
 
 const PIXELS_PER_SECOND = 90;
 const ROW_HEIGHT = 30;
 const LEFT_GUTTER = 56;
 const TOP_PAD = 22;
 const BOTTOM_PAD = 22;
-
-const TECHNIQUE_MARKS: Record<NonNullable<TabNote["technique"]>, string> = {
-  hammer_on: "h",
-  pull_off: "p",
-  slide: "/",
-  bend: "b",
-  vibrato: "~",
-  palm_mute: "PM",
-  tremolo: "tr",
-};
 
 function noteLetter(name: string): string {
   // "E2" -> "E", "Eb4" -> "E♭"
@@ -164,7 +155,7 @@ export default function TabViewer({ tab, currentTime, onSeek }: Props) {
             event.notes.map((note, ni) => {
               const x = LEFT_GUTTER + event.time * PIXELS_PER_SECOND;
               const y = yForString(note.string);
-              const mark = note.technique ? TECHNIQUE_MARKS[note.technique] : null;
+              const mark = techniqueMark(note);
               return (
                 <g key={`${ei}-${ni}`}>
                   <rect x={x - 11} y={y - 11} width={22} height={22} rx={5} fill="var(--color-parchment)" stroke="#8a7a5c" strokeWidth={1} />
@@ -198,7 +189,7 @@ export default function TabViewer({ tab, currentTime, onSeek }: Props) {
       </div>
 
       <p className="border-t border-walnut-700 px-5 py-2.5 text-xs text-muted">
-        Клик по партитуре — переход воспроизведения на это место. Цифра на линии — номер лада, буква над ней — приём игры (h — хаммер-он, p — пул-офф, / — слайд, b — бенд, ~ — вибрато, PM — палм-мьют, tr — тремоло).
+        Клик по партитуре — переход воспроизведения на это место. Цифра на линии — номер лада, буква над ней — приём игры (h — хаммер-он, p — пул-офф, / — слайд, b½ / b1 — бенд на полтона / на тон, ~ — вибрато, PM — палм-мьют, tr — тремоло).
         {tab.tracks.length > 1 && " Несколько партий гитары обнаружены автоматически — переключайтесь между ними вкладками выше."}
       </p>
     </div>
