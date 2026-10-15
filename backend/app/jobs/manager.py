@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import AsyncIterable, Optional
 
 from ..models import schemas
-from ..pipeline import gp_export, ingest, rhythm, separation, transcription
+from ..pipeline import activity, gp_export, ingest, rhythm, separation, transcription
 from . import edits
 from ..pipeline.fretboard import Fretboard
 from ..pipeline.tab_builder import FingeringStyle, build_multi_track_tab
@@ -658,6 +658,12 @@ async def _run_pipeline(job: Job) -> None:
             args=(job.guitar_stem_path,),
         )
 
+        # Drop "notes" transcribed from separation residue where the guitar is
+        # silent (see pipeline/activity.py).
+        samples, sample_rate = await _run_blocking(_load_mono_samples, job.guitar_stem_path)
+        mix, mix_rate = await _run_blocking(_load_mono_samples, job.extracted_audio_path)
+        notes, _dropped = await _run_blocking(activity.filter_silent_notes, notes, samples, sample_rate, mix, mix_rate)
+
         job.check_cancelled()
 
         job.publish(stage="arranging", progress=0.0, message="Раскладываем ноты по грифу")
@@ -675,7 +681,6 @@ async def _run_pipeline(job: Job) -> None:
         job.check_cancelled()
 
         job.publish(stage="exporting", progress=0.0, message="Собираем файл для Guitar Pro")
-        samples, sample_rate = await _run_blocking(_load_mono_samples, job.guitar_stem_path)
         grid = await _run_blocking(rhythm.analyze_rhythm, samples, sample_rate)
         layout = await _run_blocking(
             gp_export.export_gp5,
